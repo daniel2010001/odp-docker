@@ -28,6 +28,14 @@ include:
 
 services:
 
+  # ─── Override del ckan incluido: imagen con la extensión umss ──
+  # Reemplaza el build del docker-compose.yml de ckan-docker para
+  # hornear ckanext-umss dentro de la imagen de producción.
+  ckan:
+    build:
+      context: ./ckan-docker
+      dockerfile: Dockerfile.umss
+
   # ─── Frontend SvelteKit (adapter-node) ─────────────────────
   frontend:
     build:
