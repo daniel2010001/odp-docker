@@ -43,9 +43,9 @@ services:
     environment:
       # Apunta el proxy interno de Vite a ckan-dev (por si se accede a :5173 directo)
       CKAN_PROXY_TARGET: http://ckan-dev:5000
-      # Puerto público del proxy para el cliente HMR. 443 => detrás de Caddy (TLS).
-      # Para probar por :8082 directo, cambialo a 8082.
-      VITE_HMR_CLIENT_PORT: "443"
+      # Puerto público del proxy para el cliente HMR. 8082 => acceso directo.
+      # Si exponés vía Caddy (https://odp.hs.lan, TLS), cambialo a 443.
+      VITE_HMR_CLIENT_PORT: "8082"
     depends_on:
       - ckan-dev
     expose:
