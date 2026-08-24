@@ -24,6 +24,14 @@ include:
 
 services:
 
+  # ─── Override del ckan-dev incluido: hornea umss (editable) ──
+  # Reemplaza el build del docker-compose.dev.yml para que la extensión
+  # umss quede instalada y recargable en vivo (bind mount).
+  ckan-dev:
+    build:
+      context: ./ckan-docker
+      dockerfile: Dockerfile.dev.umss
+
   # ─── Frontend Vite dev server (HMR) ─────────────────────────
   frontend-dev:
     build:
