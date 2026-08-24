@@ -1,0 +1,62 @@
+# docker-compose.unified.yml
+#
+# Stack unificado: CKAN + Frontend (SvelteKit) servidos detrás de un único
+# reverse proxy nginx (same-origin), sin necesidad de CORS.
+#
+# Estructura:
+#   - `include` trae el stack CKAN completo (nginx, ckan, datapusher, db,
+#     solr, redis) y sus redes (webnet, ckannet, solrnet, dbnet, redisnet).
+#   - `frontend`        : app SvelteKit compilada con adapter-node (build/).
+#                         Expone solo 3000 interno, sin puerto host.
+#   - `frontend-proxy`  : nginx que enruta / -> frontend y /api/ -> ckan.
+#                         Único punto de entrada público (puerto 8080 del host).
+#
+# Conectividad:
+#   - frontend y frontend-proxy viven en `ckannet` (red interna donde ckan
+#     también es alcanzable). frontend-proxy llega a ckan:5000 y frontend:3000
+#     por esa red, y además se publica al host por 8080:80.
+#
+# Uso:
+#   docker compose -f docker-compose.unified.yml up --build
+#   # frontend  -> http://localhost:8080
+#   # ckan (api) -> http://localhost:8080/api/3/action/status_show
+
+include:
+  # Stack CKAN ya existente (repo separado). Sus servicios, redes y variables
+  # de entorno (.env) se cargan/mezclan en este proyecto sin modificarlo.
+  - ./ckan-docker/docker-compose.yml
+
+services:
+
+  # ─── Frontend SvelteKit (adapter-node) ─────────────────────
+  frontend:
+    build:
+      context: ../odp
+      args:
+        # Vacío => el cliente HTTP usa rutas relativas /api/... (same-origin)
+        PUBLIC_CKAN_URL: ""
+    # Se conecta a la red donde nginx/ckan son alcanzables para que el proxy
+    # pueda llegar a él en :3000.
+    networks:
+      - ckannet
+    depends_on:
+      ckan:
+        condition: service_healthy
+    # Solo expuesto dentro de las redes de Compose (no se publica al host).
+    expose:
+      - "3000"
+    restart: unless-stopped
+
+  # ─── Reverse proxy nginx (punto de entrada público) ────────
+  frontend-proxy:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend-proxy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - ckannet
+      - webnet
+    depends_on:
+      - frontend
+    restart: unless-stopped
