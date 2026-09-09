@@ -43,6 +43,9 @@ services:
     environment:
       # Apunta el proxy interno de Vite a ckan-dev (por si se accede a :5173 directo)
       CKAN_PROXY_TARGET: http://ckan-dev:5000
+      # URL interna de CKAN para el proxy server-side de /auth/login.
+      # Dentro del contenedor, localhost:5000 NO es CKAN: debe apuntar a ckan-dev.
+      CKAN_INTERNAL_URL: http://ckan-dev:5000
       # Puerto público del proxy para el cliente HMR. 8082 => acceso directo.
       # Si exponés vía Caddy (https://odp.hs.lan, TLS), cambialo a 443.
       VITE_HMR_CLIENT_PORT: "8082"
