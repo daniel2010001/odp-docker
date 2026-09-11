@@ -1,6 +1,3 @@
-# ckan-docker es un repo git separado (no trackearlo aquí)
-ckan-docker/
-
 # Secretos / entorno local
 .env
 .env.*

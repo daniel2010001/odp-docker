@@ -1,0 +1,12 @@
+# Artefactos de build Python (no enviar al contexto de Docker)
+**/*.egg-info/
+**/__pycache__/
+**/*.pyc
+
+# Git / secretos
+.git
+.env
+
+# Otros
+.DS_Store
+*.log

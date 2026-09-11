@@ -1,0 +1,14 @@
+# umss-js:
+#   filters: rjsmin
+#   output: ckanext-umss/%(version)s-umss.js
+#   contents:
+#     - js/umss.js
+#   extra:
+#     preload:
+#       - base/main
+
+# umss-css:
+#   filters: cssrewrite
+#   output: ckanext-umss/%(version)s-umss.css
+#   contents:
+#     - css/umss.css
