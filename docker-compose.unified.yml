@@ -43,6 +43,10 @@ services:
       args:
         # Vacío => el cliente HTTP usa rutas relativas /api/... (same-origin)
         PUBLIC_CKAN_URL: ""
+    environment:
+      # URL interna de CKAN para el proxy server-side de /auth/login.
+      # Dentro de la red ckannet, ckan:5000 es la instancia de producción.
+      CKAN_INTERNAL_URL: http://ckan:5000
     # Se conecta a la red donde nginx/ckan son alcanzables para que el proxy
     # pueda llegar a él en :3000.
     networks:
