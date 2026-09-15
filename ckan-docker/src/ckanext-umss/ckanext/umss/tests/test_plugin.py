@@ -48,10 +48,16 @@ To temporary patch the CKAN configuration for the duration of a test you can use
         pass
 """
 import pytest
+
+from ckan.plugins import plugin_loaded
+
 import ckanext.umss.plugin as plugin
 
 
 @pytest.mark.ckan_config("ckan.plugins", "umss")
 @pytest.mark.usefixtures("with_plugins")
 def test_plugin():
+    # `plugin_loaded` is `ckan.plugins.core.plugin_loaded`, re-exported as
+    # `ckan.plugins.plugin_loaded`. It is *not* a pytest-ckan fixture in CKAN
+    # 2.11.6, so it must be imported and called, not requested as a parameter.
     assert plugin_loaded("umss")
