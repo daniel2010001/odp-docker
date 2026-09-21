@@ -25,7 +25,9 @@ jobs:
       CKAN_SQLALCHEMY_URL: postgresql://ckan_default:pass@postgres/ckan_test
       CKAN_DATASTORE_WRITE_URL: postgresql://datastore_write:pass@postgres/datastore_test
       CKAN_DATASTORE_READ_URL: postgresql://datastore_read:pass@postgres/datastore_test
-      CKAN_SOLR_URL: http://solr:8983/solr/ckan
+      # Keep in sync with the `solr_url` override in test.ini: the suite must
+      # not write into the core a running stack serves.
+      CKAN_SOLR_URL: http://solr:8983/solr/ckan_test
       CKAN_REDIS_URL: redis://redis:6379/1
 
     steps:
@@ -36,6 +38,15 @@ jobs:
         pip install -r requirements.txt
         pip install -r dev-requirements.txt
         pip install -e .
+    - name: Create the isolated test core
+      # test.ini points `solr_url` at `ckan_test` so the suite never writes into
+      # the core a running stack serves (see the comment in test.ini). The Solr
+      # service ships the CKAN configset but only precreates the `ckan` core, so
+      # create the test one. An absolute configSet path is required: a bare name
+      # is resolved against `<solr.home>/configsets`, which has no CKAN schema.
+      run: |
+        python -c "import urllib.request; print(urllib.request.urlopen('http://solr:8983/solr/admin/cores?action=CREATE&name=ckan_test&configSet=/opt/solr/server/solr/configsets/ckan').read().decode())"
+
     - name: Setup extension
       # Extra initialization steps
       run: |

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# Corre la suite de `ckanext-umss` contra la base y el índice de **test**.
+#
+# NO corras `pytest --ckan-ini=test.ini` a mano dentro de `ckan-dev`. El
+# contenedor exporta `CKAN_SQLALCHEMY_URL`, `CKAN_SOLR_URL` y `CKAN_SITE_ID`, y
+# `update_config()` (`ckan/config/environment.py`) les da precedencia sobre
+# cualquier ini vía `CONFIG_FROM_ENV_VARS`. Una corrida directa apunta entonces a
+# `ckandb` y al core `ckan` compartido, y como `clean_db` trunca, **borra la base
+# de dev**. Medido el 2026-09-21: una corrida la dejó con sólo filas de factory.
+#
+# Este script deriva las URLs de test de los valores propios de la app *dentro*
+# del contenedor, así no pueden desincronizarse de `.env`, y se niega a correr si
+# alguna no termina en `_test`.
+#
+# Uso: bin/test-umss [argumentos extra para pytest...]
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE="${ROOT}/../docker-compose.dev.unified.yml"
+
+if [[ ! -f "$COMPOSE" ]]; then
+	echo "test-umss: no encuentro ${COMPOSE}" >&2
+	exit 1
+fi
+
+docker compose -f "$COMPOSE" exec -T ckan-dev bash -lc '
+set -euo pipefail
+
+SQL="${CKAN_SQLALCHEMY_URL%ckandb}ckan_test"
+DSW="${CKAN_DATASTORE_WRITE_URL%datastore}datastore_test"
+DSR="${CKAN_DATASTORE_READ_URL%datastore}datastore_test"
+SOLR="${CKAN_SOLR_URL%ckan}ckan_test"
+
+for pair in "SQL=$SQL" "DSW=$DSW" "DSR=$DSR" "SOLR=$SOLR"; do
+	case "${pair#*=}" in
+		*_test*) ;;
+		*)
+			echo "test-umss: me niego a correr, ${pair} no apunta a test" >&2
+			exit 1
+			;;
+	esac
+done
+
+# La imagen de Solr precrea sólo el core `ckan`. El `configSet` absoluto es
+# obligatorio: un nombre suelto se resuelve contra `<solr.home>/configsets`, que
+# no tiene el esquema de CKAN. Idempotente.
+CORE="${SOLR##*/}"
+python - "$SOLR" "$CORE" <<PY
+import json, sys, urllib.request, urllib.error
+
+solr, core = sys.argv[1], sys.argv[2]
+base = solr.rsplit("/solr/", 1)[0]
+with urllib.request.urlopen(base + "/solr/admin/cores?action=STATUS") as r:
+    if core in json.load(r).get("status", {}):
+        sys.exit(0)
+url = (base + "/solr/admin/cores?action=CREATE&name=" + core +
+       "&configSet=/opt/solr/server/solr/configsets/ckan")
+try:
+    with urllib.request.urlopen(url) as r:
+        print("test-umss: core creado:", json.load(r))
+except urllib.error.HTTPError as e:
+    print("test-umss: no pude crear el core %s: %s" % (core, e.read().decode()[:300]), file=sys.stderr)
+    sys.exit(1)
+PY
+
+export CKAN_SQLALCHEMY_URL="$SQL"
+export CKAN_DATASTORE_WRITE_URL="$DSW"
+export CKAN_DATASTORE_READ_URL="$DSR"
+export CKAN_SOLR_URL="$SOLR"
+export CKAN_SITE_ID="test.ckan.net"
+
+cd /srv/app/src_extensions/ckanext-umss
+python -m pytest --ckan-ini=test.ini "$@"
+' _ "$@"
