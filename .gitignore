@@ -6,3 +6,5 @@
 # Sistema / tooling
 .DS_Store
 *.log
+# Local Pi runtime state
+.atl/
