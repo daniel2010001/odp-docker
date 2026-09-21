@@ -3,5 +3,5 @@
 set -e
 ROOT="$(dirname ${BASH_SOURCE[0]})/.."
 
-docker compose -f "${ROOT}/docker-compose.dev.yml" exec ckan-dev \
+docker compose -f "${ROOT}/../docker-compose.dev.unified.yml" exec ckan-dev \
 	bash -c 'kill $(ls -l /proc/*/exe | grep bin/python | grep -Po '"'"'/proc/\K[^/]*'"'"')'

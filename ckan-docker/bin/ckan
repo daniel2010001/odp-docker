@@ -3,4 +3,4 @@
 set -e
 ROOT="$(dirname ${BASH_SOURCE[0]})/.."
 
-docker compose -f "${ROOT}/docker-compose.dev.yml" exec ckan-dev ckan "$@"
+docker compose -f "${ROOT}/../docker-compose.dev.unified.yml" exec ckan-dev ckan "$@"

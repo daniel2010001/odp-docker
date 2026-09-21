@@ -9,6 +9,6 @@ else
 	USERGROUP="$(stat -c '%u:%g' "${ROOT}/src")"
 fi
 
-docker compose -f "${ROOT}/docker-compose.dev.yml" exec -u "$USERGROUP" \
+docker compose -f "${ROOT}/../docker-compose.dev.unified.yml" exec -u "$USERGROUP" \
 	-e HOME=/srv/app/src_extensions ckan-dev ckan generate extension \
 	--output-dir /srv/app/src_extensions
