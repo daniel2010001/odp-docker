@@ -27,18 +27,39 @@ fi
 docker compose -f "$COMPOSE" exec -T ckan-dev bash -lc '
 set -euo pipefail
 
-SQL="${CKAN_SQLALCHEMY_URL%ckandb}ckan_test"
-DSW="${CKAN_DATASTORE_WRITE_URL%datastore}datastore_test"
-DSR="${CKAN_DATASTORE_READ_URL%datastore}datastore_test"
-SOLR="${CKAN_SOLR_URL%ckan}ckan_test"
+# Derivar el destino de test del último SEGMENTO del path, no del string
+# entero: un `?query` o un `#fragment` no debe poder colar el nombre de dev, y
+# un segmento que no sea un nombre de dev conocido se rechaza.
+derive() {
+	local url="$1" base rest last dst
+	base="${url%%[?#]*}"
+	rest="${url#"$base"}"
+	last="${base##*/}"
+	case "$last" in
+	ckandb | ckan) dst=ckan_test ;;
+	datastore) dst=datastore_test ;;
+	*)
+		echo "test-umss: '$url' no termina en un nombre de dev conocido (último segmento: '$last')" >&2
+		return 1
+		;;
+	esac
+	printf '%s' "${base%"$last"}$dst$rest"
+}
 
+SQL="$(derive "$CKAN_SQLALCHEMY_URL")" || exit 1
+DSW="$(derive "$CKAN_DATASTORE_WRITE_URL")" || exit 1
+DSR="$(derive "$CKAN_DATASTORE_READ_URL")" || exit 1
+SOLR="$(derive "$CKAN_SOLR_URL")" || exit 1
+
+# La guarda mira el SEGMENTO del path, no el string entero.
 for pair in "SQL=$SQL" "DSW=$DSW" "DSR=$DSR" "SOLR=$SOLR"; do
-	case "${pair#*=}" in
-		*_test*) ;;
-		*)
-			echo "test-umss: me niego a correr, ${pair} no apunta a test" >&2
-			exit 1
-			;;
+	seg="${pair#*=}"; seg="${seg%%[?#]*}"; seg="${seg##*/}"
+	case "$seg" in
+	*_test) ;;
+	*)
+		echo "test-umss: me niego a correr, ${pair} no apunta a test" >&2
+		exit 1
+		;;
 	esac
 done
 
