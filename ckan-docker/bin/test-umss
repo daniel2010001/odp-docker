@@ -30,6 +30,11 @@ set -euo pipefail
 # Derivar el destino de test del último SEGMENTO del path, no del string
 # entero: un `?query` o un `#fragment` no debe poder colar el nombre de dev, y
 # un segmento que no sea un nombre de dev conocido se rechaza.
+#
+# NADA de comillas simples en todo este payload: va dentro del `bash -lc`
+# remoto y una suelta lo termina antes de tiempo. `bash -n` sobre el archivo no
+# lo ve —la sintaxis suelta está bien— y el fallo aparece en expansión: medido,
+# el shell local expande `$url` sin comillas y con `set -u` aborta la invocación.
 derive() {
 	local url="$1" base rest last dst
 	base="${url%%[?#]*}"
@@ -39,11 +44,11 @@ derive() {
 	ckandb | ckan) dst=ckan_test ;;
 	datastore) dst=datastore_test ;;
 	*)
-		echo "test-umss: '$url' no termina en un nombre de dev conocido (último segmento: '$last')" >&2
+		echo "test-umss: $url no termina en un nombre de dev conocido (último segmento: $last)" >&2
 		return 1
 		;;
 	esac
-	printf '%s' "${base%"$last"}$dst$rest"
+	printf "%s" "${base%$last}$dst$rest"
 }
 
 SQL="$(derive "$CKAN_SQLALCHEMY_URL")" || exit 1
