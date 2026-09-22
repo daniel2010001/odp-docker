@@ -6,8 +6,13 @@
 # contenedor exporta `CKAN_SQLALCHEMY_URL`, `CKAN_SOLR_URL` y `CKAN_SITE_ID`, y
 # `update_config()` (`ckan/config/environment.py`) les da precedencia sobre
 # cualquier ini vía `CONFIG_FROM_ENV_VARS`. Una corrida directa apunta entonces a
-# `ckandb` y al core `ckan` compartido, y como `clean_db` trunca, **borra la base
-# de dev**. Medido el 2026-09-21: una corrida la dejó con sólo filas de factory.
+# `ckandb` y al core `ckan` compartido. `clean_db` no trunca: refleja el esquema y
+# hace `drop_all`, así que **borra el esquema y los datos de la base de dev**.
+# Medido el 2026-09-21: una corrida la dejó con sólo filas de factory.
+#
+# Desde el 2026-09-22 la suite además se niega a arrancar en ese estado
+# (`conftest.py` + `ckanext/umss/tests/target_guard.py`); esta guarda del llamador
+# sigue siendo la primera línea, la que evita que el problema llegue a existir.
 #
 # Este script deriva las URLs de test de los valores propios de la app *dentro*
 # del contenedor, así no pueden desincronizarse de `.env`, y se niega a correr si

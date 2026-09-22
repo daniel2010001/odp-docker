@@ -8,6 +8,7 @@
   - [4.  Install (build and run) CKAN plus dependencies](#4--install-build-and-run-ckan-plus-dependencies)
     - [Base mode](#base-mode)
     - [Development mode](#development-mode)
+      - [Running the `ckanext-umss` tests](#running-the-ckanext-umss-tests)
       - [Create an extension](#create-an-extension)
       - [Running HTTPS on development mode](#running-https-on-development-mode)
       - [Remote Debugging with VS Code](#remote-debugging-with-vs-code)
@@ -110,6 +111,7 @@ dev script | description
 `bin/reload` | reload ckan within the ckan-dev container without restarting
 `bin/restart` | shut down and restart the whole ckan-dev container (use `bin/compose up -d` instead to reload new values from .env)
 `bin/shell` | exec bash prompt within the ckan-dev container
+`bin/test-umss` | run the `ckanext-umss` test suite against the test database and the test Solr core (see [Running the `ckanext-umss` tests](#running-the-ckanext-umss-tests))
 
 To build the images:
 
@@ -124,6 +126,34 @@ To start the containers:
 	bin/compose up
 
 See [CKAN images](#5-ckan-images) for more details of what happens when using development mode.
+
+#### Running the `ckanext-umss` tests
+
+The extension lives in `src/ckanext-umss` and is served by the `umss` plugin. Run its suite
+from the repository root:
+
+	bin/test-umss [pytest arguments...]
+
+`test-umss` derives the test database, datastore and Solr core from the container's own
+values, exports them, and then runs `pytest --ckan-ini=test.ini`.
+
+Do not run `pytest --ckan-ini=test.ini` directly inside `ckan-dev`. `test.ini` cannot win:
+`update_config()` (`ckan/config/environment.py`, `CONFIG_FROM_ENV_VARS`) applies the
+container's `CKAN_SQLALCHEMY_URL`, `CKAN_SOLR_URL` and `CKAN_SITE_ID` *after* the ini, so a
+direct run points at the development database and at the Solr core the running stack serves
+— and `clean_db` drops every table in the database it is pointed at.
+
+The suite now refuses to start in that state. `conftest.py` in `src/ckanext-umss` checks the
+effective configuration at session start, before CKAN opens a database connection, and
+aborts with `USAGE_ERROR` when a database URL or the Solr core is not test-scoped. The check
+lives in `src/ckanext-umss/ckanext/umss/tests/target_guard.py`; it parses the URL, so a query
+string cannot make a development database look like a test one, and it redacts passwords
+from what it prints.
+
+If a suite ever did reach the live index — a run from before this guard existed, for
+instance — rebuild the search index afterwards:
+
+	bin/ckan search-index rebuild --clear
 
 
 #### Create an extension
