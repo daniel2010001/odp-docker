@@ -2,8 +2,8 @@
 Tests for ``target_guard``: the collection-time refusal that keeps this suite off
 anything that is not a test-scoped database or Solr core.
 
-The unit tests below cover the predicate. The last test covers the wiring: a
-predicate nobody calls protects nothing, so it starts a real pytest session (in a
+The unit tests below cover the predicate. One test covers the wiring: a predicate
+nobody calls protects nothing, so it starts a real pytest session (in a
 subprocess) against a non-test database and requires that session to abort.
 """
 
@@ -77,8 +77,8 @@ def test_a_test_name_hidden_in_the_query_string_does_not_pass(key, value):
     """`_test` anywhere in the string is not the same as a test target.
 
     A string-containment guard accepted `...@db/ckandb?application_name=ckan_test`
-    and let a run reach the development database. The guard reads the URL path
-    segment, so the trick cannot work.
+    and let a run reach the development database. The guard asks the driver which
+    database the URL resolves to, so the trick cannot work.
     """
     assert len(unsafe_targets(config(**{key: value}))) == 1
 

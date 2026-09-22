@@ -11,19 +11,18 @@ Este repo asume directorios hermanos:
 ├── odp/                  # frontend SvelteKit (github.com/daniel2010001/odp)
 │   └── Dockerfile
 └── odp-docker/           # este repo
-    ├── ckan-docker/      # clon de github.com/ckan/ckan-docker (+ ckanext-umss)
+    ├── ckan-docker/      # backend CKAN, versionado aquí (upstream + ckanext-umss)
     ├── docker-compose.unified.yml
     └── frontend-proxy/
         └── nginx.conf
 ```
 
-`ckan-docker/` es un repo git separado (clon del upstream de CKAN con los cambios locales del plugin `ckanext-umss`), por eso está en `.gitignore`.
+`ckan-docker/` está **rastreado en este mismo repo**: es el upstream de CKAN congelado más el plugin `ckanext-umss`, incorporado en el commit `1a06737` para que el stack se reproduzca con un solo `git clone`. No es un repo git aparte ni está en `.gitignore`.
 
 Para reproducir el layout:
 
 ```sh
 git clone https://github.com/daniel2010001/odp.git ../odp
-git clone https://github.com/ckan/ckan-docker.git ckan-docker   # + tu fork con ckanext-umss
 git clone https://github.com/daniel2010001/odp-docker.git .
 ```
 

@@ -151,6 +151,11 @@ database the URL resolves to — the path alone is not the answer, because a que
 can override it — and its refusal names the target it resolved instead of printing the URL,
 which would carry the password.
 
+The guard covers this extension's suite, because it is a `conftest.py` in this extension:
+any other pytest run inside `ckan-dev` — another checkout, another directory — stays
+unprotected. CKAN's own pytest plugin loads in every such run and reads the container's
+configuration, so treat `bin/test-umss` as the only supported way to run tests here.
+
 If a suite ever did reach the live index — a run from before this guard existed, for
 instance — rebuild the search index afterwards:
 
