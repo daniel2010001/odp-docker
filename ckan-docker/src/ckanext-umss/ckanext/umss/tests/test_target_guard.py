@@ -14,7 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from ckanext.umss.tests.target_guard import unsafe_targets, with_env_overrides
+from ckanext.umss.tests.target_guard import (
+    _database_name,
+    unsafe_targets,
+    with_env_overrides,
+)
 
 TEST_DB = "postgresql://ckandbuser:ckandbpassword@db/ckan_test"
 TEST_DATASTORE_WRITE = "postgresql://ckandbuser:ckandbpassword@db/datastore_test"
@@ -191,3 +195,36 @@ def test_an_empty_environment_variable_does_not_override():
 
 def test_settings_without_an_environment_variable_keep_their_ini_value():
     assert with_env_overrides(config(), {}) == config()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://ckandbuser:ckandbpassword@db/ckan_test?database=ckandb",
+        "postgresql://ckandbuser:ckandbpassword@db/ckan_test?dbname=ckandb",
+    ],
+)
+def test_a_query_parameter_cannot_redirect_the_database(url):
+    """The measured bypass: the path said `ckan_test`, the connection opened `ckandb`.
+
+    Under psycopg2, `...?database=ckandb` connected to `ckandb`, and
+    `...?dbname=ckandb` left two spellings of the setting, which psycopg2 rejects.
+    Neither may pass: `clean_db` drops every table in the database that is really
+    opened, not in the one the path names.
+    """
+    problems = unsafe_targets(config(**{"sqlalchemy.url": url}))
+    assert len(problems) == 1
+    assert "sqlalchemy.url" in problems[0]
+
+
+def test_an_innocent_query_parameter_is_accepted():
+    """`application_name` is a real libpq parameter and redirects nothing."""
+    url = "postgresql://ckandbuser:ckandbpassword@db/ckan_test?application_name=umss"
+    assert unsafe_targets(config(**{"sqlalchemy.url": url})) == []
+
+
+def test_the_database_name_comes_from_the_driver_translation():
+    """White-box: the value below is the database `clean_db` would drop tables in."""
+    assert _database_name("postgresql://u:p@db/ckan_test") == "ckan_test"
+    assert _database_name("postgresql://u:p@db/ckan_test?database=ckandb") == "ckandb"
+    assert _database_name("postgresql://u:p@db/ckan_test?dbname=ckandb") == ""

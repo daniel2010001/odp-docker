@@ -146,9 +146,9 @@ direct run points at the development database and at the Solr core the running s
 The suite now refuses to start in that state. `conftest.py` in `src/ckanext-umss` checks the
 effective configuration at session start, before CKAN opens a database connection, and
 aborts with `USAGE_ERROR` when a database URL or the Solr core is not test-scoped. The check
-lives in `src/ckanext-umss/ckanext/umss/tests/target_guard.py`; it parses the URL, so a query
-string cannot make a development database look like a test one, and it redacts passwords
-from what it prints.
+lives in `src/ckanext-umss/ckanext/umss/tests/target_guard.py`; it asks the driver which
+database the URL resolves to — the path alone is not the answer, because a query parameter
+can override it — and it redacts passwords from what it prints.
 
 If a suite ever did reach the live index — a run from before this guard existed, for
 instance — rebuild the search index afterwards:

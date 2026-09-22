@@ -11,9 +11,11 @@ because ``update_config()`` applies ``CONFIG_FROM_ENV_VARS`` after the ini
 that by deriving test URLs and exporting them over the container's own values;
 this module is what protects every other way of starting pytest.
 
-The checks read parsed URLs, not strings. A guard that looks for ``_test``
-anywhere in the value accepts ``...@db/ckandb?application_name=ckan_test`` and
-lets the run reach the development database.
+The database is read from the driver, not from the URL path. ``make_url()``
+answers with the path segment, and a query parameter can override it: measured
+against psycopg2 in this stack, ``.../db/ckan_test?database=ckandb`` opens
+``ckandb``. ``create_connect_args()`` is what the driver itself resolves, so
+asking it is the only way to know which database a run will really drop.
 """
 
 import re
@@ -81,16 +83,25 @@ def _last_path_segment(value: str) -> str:
 
 
 def _database_name(value: str) -> str:
-    """The database a URL points at, read from its path.
+    """The database the driver will open, as the driver itself resolves it.
 
-    Parsing is what keeps a query string from masquerading as a test target. An
-    unparseable URL, or one with no database at all, yields an empty name and
-    therefore fails the check.
+    The URL path is not the answer: ``create_connect_args()`` merges the URL
+    query over it, so ``.../db/ckan_test?database=ckandb`` opens ``ckandb``. Two
+    spellings of the same setting are not an answer either: psycopg2 rejects the
+    pair, and a driver that tolerated it would pick one of them. An unknown
+    driver, an unparseable URL and both cases above yield an empty name, and an
+    empty name fails the check.
     """
     try:
-        return make_url(_without_query(value)).database or ""
+        url = make_url(value)
+        _, connect_args = url.get_dialect()().create_connect_args(url)
     except ArgumentError:
         return ""
+    spelled = {connect_args.get("database"), connect_args.get("dbname")}
+    spelled.discard(None)
+    if len(spelled) != 1:
+        return ""
+    return spelled.pop()
 
 
 def _redact(value: str) -> str:
