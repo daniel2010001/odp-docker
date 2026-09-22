@@ -23,7 +23,6 @@ from typing import Any, Mapping
 
 from ckan.config.environment import CONFIG_FROM_ENV_VARS
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import ArgumentError
 
 # Settings holding a database URL, and whether an unset value is unsafe.
 # Without `sqlalchemy.url` there is no known-safe answer. The datastore URLs are
@@ -47,8 +46,12 @@ def unsafe_targets(config: Mapping[str, Any]) -> list[str]:
     """Describe every configured target that is not test-scoped.
 
     Returns an empty list when the whole configuration is safe. Each message
-    names the setting and the offending value with the password redacted: this
-    output reaches terminals and CI logs, so it must never carry a credential.
+    names the setting and the **target name it resolves to**, never the configured
+    URL, because no URL can be redacted safely field by field. Measured,
+    `postgresql://u:p@ss@db/ckandb` is parsed with the password split at the first
+    `@`, so the rest of the password lands in the host and SQLAlchemy's own
+    `hide_password=True` rendering prints it. A database or core *name* is not a
+    credential, so it is the only part worth printing.
     """
     problems = []
 
@@ -56,18 +59,49 @@ def unsafe_targets(config: Mapping[str, Any]) -> list[str]:
         value = _clean(config.get(setting))
         if not value:
             if mandatory:
-                problems.append(f"{setting} = {_NOT_SET}")
+                problems.append(f"{setting}: {_NOT_SET}")
             continue
-        if not _database_name(value).endswith(TEST_SUFFIX):
-            problems.append(f"{setting} = {_redact(value)}")
+        database = _printable_name(_database_name(value))
+        if not database.endswith(TEST_SUFFIX):
+            problems.append(_not_test_scoped(setting, database, "database"))
 
     solr = _clean(config.get(SOLR_SETTING))
     if not solr:
-        problems.append(f"{SOLR_SETTING} = {_NOT_SET}")
+        problems.append(f"{SOLR_SETTING}: {_NOT_SET}")
     elif not _last_path_segment(solr).endswith(TEST_SUFFIX):
-        problems.append(f"{SOLR_SETTING} = {_redact(solr)}")
+        core = _printable_name(_last_path_segment(solr))
+        problems.append(_not_test_scoped(SOLR_SETTING, core, "core"))
 
     return problems
+
+
+def _not_test_scoped(setting: str, name: str, kind: str) -> str:
+    """One refusal line, built from the resolved name and never from the URL.
+
+    An empty `name` means the value did not resolve to exactly one name, which is
+    itself a reason to refuse: an unresolvable target is not a proven test target.
+    """
+    if name:
+        return (
+            f'{setting}: the {kind} it resolves to, "{name}", is not '
+            f"{TEST_SUFFIX}-scoped"
+        )
+    return (
+        f"{setting}: it does not resolve to one {kind} name, so it is not "
+        f"{TEST_SUFFIX}-scoped"
+    )
+
+
+def _printable_name(name: str) -> str:
+    """The name when it is shaped like one, otherwise nothing.
+
+    Whatever reaches the refusal must be safe to print. A database or core name
+    carries no `@` and no `:`, so a value that does is not a name: the caller
+    reports it as unresolvable instead of printing it.
+    """
+    if name and not any(char in name for char in "@:"):
+        return name
+    return ""
 
 
 def _clean(value: Any) -> str:
@@ -95,20 +129,15 @@ def _database_name(value: str) -> str:
     try:
         url = make_url(value)
         _, connect_args = url.get_dialect()().create_connect_args(url)
-    except ArgumentError:
+    except Exception:
+        # A URL the driver cannot translate is not a URL proven safe, and a guard
+        # that crashes the session it protects is worse than one that refuses.
         return ""
     spelled = {connect_args.get("database"), connect_args.get("dbname")}
     spelled.discard(None)
     if len(spelled) != 1:
         return ""
     return spelled.pop()
-
-
-def _redact(value: str) -> str:
-    try:
-        return make_url(value).render_as_string(hide_password=True)
-    except ArgumentError:
-        return re.sub(r"://([^/@:]+):[^/@]*@", r"://\1:***@", value)
 
 
 def with_env_overrides(

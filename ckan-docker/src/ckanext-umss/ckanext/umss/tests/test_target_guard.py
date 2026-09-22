@@ -120,15 +120,49 @@ def test_datastore_urls_may_be_absent():
     [
         "postgresql://ckandbuser:total-secret@db/ckandb",
         "postgresql://ckandbuser:total%2Dsecret@db/ckandb",
+        "postgresql://ckandbuser:p@ss@db/ckandb",
         "http://pusher:total-secret@solr:8983/solr/ckan",
+        "ckandbuser:total-secret@db/ckandb",
     ],
 )
-def test_a_rejected_target_never_reports_its_password(url):
+def test_the_refusal_never_prints_the_url_or_its_password(url):
+    """The strongest invariant available: no URL reaches the refusal at all.
+
+    Redacting a URL is not safe in general. `make_url` splits
+    `postgresql://u:p@ss@db/ckandb` at the first `@`, so the rest of the password
+    is part of the *host* and SQLAlchemy's own `hide_password=True` rendering
+    prints it. The refusal reports the resolved name instead, and this test pins
+    that no `://` can appear.
+    """
     problems = unsafe_targets(config(**{"sqlalchemy.url": url, "solr_url": url}))
     report = " ".join(problems)
     assert "total-secret" not in report
     assert "total%2Dsecret" not in report
-    assert "***" in report
+    assert "p@ss" not in report
+    assert "://" not in report
+
+
+def test_any_failure_to_translate_a_url_fails_closed(monkeypatch):
+    """The guard refuses; it never crashes the session it protects.
+
+    An unknown driver is already an `ArgumentError`, so it falls through the
+    `except`. This pins the wider contract: whatever the driver machinery raises,
+    the answer is an empty name and a refusal line rather than an exception.
+    """
+    import ckanext.umss.tests.target_guard as guard
+
+    def explode(value):
+        raise RuntimeError("driver machinery exploded")
+
+    monkeypatch.setattr(guard, "make_url", explode)
+    url = "postgresql://ckandbuser:ckandbpassword@db/ckan_test"
+    assert guard._database_name(url) == ""
+    problems = guard.unsafe_targets(config())
+    assert [problem.split(":")[0] for problem in problems] == [
+        "sqlalchemy.url",
+        "ckan.datastore.write_url",
+        "ckan.datastore.read_url",
+    ]
 
 
 def test_the_guard_is_wired_into_collection():
@@ -181,7 +215,7 @@ def test_the_environment_wins_over_the_ini():
         },
     )
     problems = unsafe_targets(effective)
-    assert [problem.split(" =")[0] for problem in problems] == [
+    assert [problem.split(":")[0] for problem in problems] == [
         "sqlalchemy.url",
         "solr_url",
     ]

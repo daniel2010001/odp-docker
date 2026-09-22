@@ -130,7 +130,7 @@ See [CKAN images](#5-ckan-images) for more details of what happens when using de
 #### Running the `ckanext-umss` tests
 
 The extension lives in `src/ckanext-umss` and is served by the `umss` plugin. Run its suite
-from the repository root:
+from the root of this directory (`ckan-docker/` in the outer repository):
 
 	bin/test-umss [pytest arguments...]
 
@@ -148,7 +148,8 @@ effective configuration at session start, before CKAN opens a database connectio
 aborts with `USAGE_ERROR` when a database URL or the Solr core is not test-scoped. The check
 lives in `src/ckanext-umss/ckanext/umss/tests/target_guard.py`; it asks the driver which
 database the URL resolves to — the path alone is not the answer, because a query parameter
-can override it — and it redacts passwords from what it prints.
+can override it — and its refusal names the target it resolved instead of printing the URL,
+which would carry the password.
 
 If a suite ever did reach the live index — a run from before this guard existed, for
 instance — rebuild the search index afterwards:
