@@ -1,0 +1,139 @@
+name: Checks
+
+# The repository's own CI. The workflows under `ckan-docker/.github/` and
+# `ckan-docker/src/ckanext-umss/.github/` belong to their upstream repositories:
+# GitHub only runs workflows from the root `.github/workflows/`, so they never
+# execute here, and they are correct where they live.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  shell-tests:
+    name: Host shell tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax-check the entrypoint scripts
+        # `Dockerfile.dev` COPYs these into the image and
+        # `/srv/app/start_ckan_development.sh` sources them at every start, so a
+        # syntax error is a container that does not come up. `bash -n` catches it
+        # in a second, with nothing built.
+        run: |
+          status=0
+          for f in ckan-docker/*/docker-entrypoint.d/*.sh; do
+            [ -e "$f" ] || continue
+            echo "bash -n $f"
+            bash -n "$f" || status=1
+          done
+          exit "$status"
+
+      - name: Run the host tests
+        # Every `ckan-docker/*/tests/*.sh` is self-contained: it stubs the commands
+        # it needs, so it runs here in milliseconds without Docker. The glob means a
+        # new test file is picked up without editing this workflow.
+        run: |
+          status=0
+          for t in ckan-docker/*/tests/*.sh; do
+            [ -e "$t" ] || continue
+            echo "== $t"
+            bash "$t" || status=1
+          done
+          exit "$status"
+
+  umss-tests:
+    name: ckanext-umss test suite
+    runs-on: ubuntu-latest
+    # Mirrors `ckan-docker/src/ckanext-umss/.github/workflows/test.yml`, the
+    # extension's upstream CI. Only the paths change: at the repository root the
+    # extension is not the workspace root, hence `working-directory` below.
+    container:
+      # The CKAN version tag of the Solr and Postgres containers must match the
+      # one of the container the tests run on.
+      image: ckan/ckan-dev:2.11
+    services:
+      solr:
+        image: ckan/ckan-solr:2.11-solr9
+      postgres:
+        image: ckan/ckan-postgres-dev:2.11
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:3
+    env:
+      CKAN_SQLALCHEMY_URL: postgresql://ckan_default:pass@postgres/ckan_test
+      CKAN_DATASTORE_WRITE_URL: postgresql://datastore_write:pass@postgres/datastore_test
+      CKAN_DATASTORE_READ_URL: postgresql://datastore_read:pass@postgres/datastore_test
+      # Both targets must stay test-scoped: `conftest.py` refuses the session
+      # otherwise, and that refusal is the point of the guard.
+      CKAN_SOLR_URL: http://solr:8983/solr/ckan_test
+      CKAN_REDIS_URL: redis://redis:6379/1
+    defaults:
+      run:
+        working-directory: ckan-docker/src/ckanext-umss
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install requirements
+        run: |
+          pip install -r requirements.txt
+          pip install -r dev-requirements.txt
+          pip install -e .
+
+      - name: Create the isolated test core
+        # The Solr service ships the CKAN configset but only precreates the `ckan`
+        # core, and `test.ini` points `solr_url` at `ckan_test`. An absolute
+        # configSet path is required: a bare name is resolved against
+        # `<solr.home>/configsets`, which has no CKAN schema.
+        #
+        # The `solr` service has no healthcheck, so this can be the first thing to
+        # touch it and race its startup. Retry while Solr is unreachable, and let an
+        # HTTP error fail immediately: that is Solr answering, not a startup race.
+        # `HTTPError` is a subclass of `URLError`, so the except order below is what
+        # keeps a real API error out of the retry path.
+        run: |
+          python - <<'PY'
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          URL = ("http://solr:8983/solr/admin/cores?action=CREATE&name=ckan_test"
+                 "&configSet=/opt/solr/server/solr/configsets/ckan")
+          ATTEMPTS = 20
+          DELAY_SECONDS = 5
+
+          for attempt in range(1, ATTEMPTS + 1):
+              try:
+                  print(urllib.request.urlopen(URL, timeout=30).read().decode())
+                  sys.exit(0)
+              except urllib.error.HTTPError:
+                  raise  # Solr answered; an API error is not a startup race.
+              except urllib.error.URLError as unreachable:
+                  print(
+                      "solr not reachable yet (%s); attempt %d/%d"
+                      % (unreachable, attempt, ATTEMPTS),
+                      file=sys.stderr,
+                  )
+                  time.sleep(DELAY_SECONDS)
+          sys.exit("solr never answered; gave up after %d attempts" % ATTEMPTS)
+          PY
+
+      - name: Setup extension
+        run: |
+          # `test.ini` resolves the CKAN core config relative to the extension
+          # checkout (`../../src/ckan`), which does not exist in this repository.
+          # Point it at the copy that ships inside the container.
+          sed -i -e 's/use = config:.*/use = config:\/srv\/app\/src\/ckan\/test-core.ini/' test.ini
+
+          ckan -c test.ini db init
+
+      - name: Run tests
+        run: pytest --ckan-ini=test.ini --cov=ckanext.umss --disable-warnings ckanext/umss

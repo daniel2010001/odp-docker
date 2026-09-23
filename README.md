@@ -46,3 +46,21 @@ docker compose -f docker-compose.unified.yml up --build -d
 ## Conectividad
 
 nginx reverse proxy same-origin: el frontend se build-ea con `PUBLIC_CKAN_URL` vacío y usa `/api/...` relativo, que el proxy enruta a `ckan:5000` sin reescribir el path (CKAN espera `/api/3/action/<action>`), evitando CORS.
+
+## Checks (CI)
+
+`.github/workflows/checks.yml` corre dos jobs en cada push y pull request a `master`:
+
+| job | qué verifica | coste |
+|---|---|---|
+| `shell-tests` | que los `docker-entrypoint.d/*.sh` parseen, y que pasen todos los `ckan-docker/*/tests/*.sh` | segundos, sin Docker |
+| `umss-tests` | la suite de `ckanext-umss` en `ckan/ckan-dev:2.11` con solr, postgres y redis | minutos |
+
+Los workflows que viven dentro de `ckan-docker/.github/` y de `ckan-docker/src/ckanext-umss/.github/` pertenecen a sus repos upstream: GitHub **no** los ejecuta aquí, porque sólo lee `.github/workflows/` en la raíz del repo.
+
+El job liviano son, literalmente, estos dos loops; localmente no hace falta Docker. El `[ -e ... ] || continue` que el workflow agrega sólo evita que un glob vacío falle por accidente:
+
+```sh
+for f in ckan-docker/*/docker-entrypoint.d/*.sh; do bash -n "$f"; done
+for t in ckan-docker/*/tests/*.sh; do bash "$t"; done
+```
