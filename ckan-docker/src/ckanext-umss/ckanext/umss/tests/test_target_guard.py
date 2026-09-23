@@ -103,6 +103,28 @@ def test_a_database_url_without_a_database_name_is_rejected():
     assert len(problems) == 1
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://solr:8983/solr/ckan@evil_test",
+        "http://solr:8983/solr/:ckan_test",
+    ],
+)
+def test_a_solr_core_that_is_not_name_shaped_is_rejected(url):
+    """The database branch rule, applied here too: resolve the name, then check it.
+
+    `_printable_name` decides whether a value is a name at all (no `@`, no `:`). The
+    database branch applies it *before* the suffix check. The Solr branch checked the
+    raw segment and only filtered the value it printed, so a core segment carrying
+    `@` or `:` passed the guard as long as it ended in `_test`. An unnameable target
+    is not a proven test target, so it has to fail closed.
+    """
+    problems = unsafe_targets(config(**{"solr_url": url}))
+    assert len(problems) == 1
+    assert "solr_url" in problems[0]
+    assert "does not resolve" in problems[0]
+
+
 def test_datastore_urls_may_be_absent():
     """The suite does not enable `datastore`, so an unset datastore is not a hazard.
 

@@ -68,9 +68,10 @@ def unsafe_targets(config: Mapping[str, Any]) -> list[str]:
     solr = _clean(config.get(SOLR_SETTING))
     if not solr:
         problems.append(f"{SOLR_SETTING}: {_NOT_SET}")
-    elif not _last_path_segment(solr).endswith(TEST_SUFFIX):
+    else:
         core = _printable_name(_last_path_segment(solr))
-        problems.append(_not_test_scoped(SOLR_SETTING, core, "core"))
+        if not core.endswith(TEST_SUFFIX):
+            problems.append(_not_test_scoped(SOLR_SETTING, core, "core"))
 
     return problems
 
