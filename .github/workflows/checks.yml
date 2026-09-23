@@ -54,7 +54,18 @@ jobs:
     container:
       # The CKAN version tag of the Solr and Postgres containers must match the
       # one of the container the tests run on.
+      #
+      # `--user root` is not decoration. This image runs as `ckan` (uid 503), and
+      # the runner writes its own file commands under a root-owned
+      # `/__w/_temp`, which that user cannot write to: without this,
+      # `actions/checkout@v4` itself dies with `EACCES: permission denied, open
+      # '/__w/_temp/_runner_file_commands/save_state_...'` and every later step
+      # is skipped. Measured on this workflow's first run (35824756749):
+      # `shell-tests` passed in 5s and `umss-tests` failed in 1m8s inside
+      # `Run actions/checkout@v4`. The vendored template this job mirrors has the
+      # same defect; it is not the safe choice it looks like.
       image: ckan/ckan-dev:2.11
+      options: --user root
     services:
       solr:
         image: ckan/ckan-solr:2.11-solr9
