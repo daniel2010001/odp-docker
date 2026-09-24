@@ -31,6 +31,16 @@ services:
     build:
       context: ./ckan-docker
       dockerfile: Dockerfile.dev.umss
+    volumes:
+      # El script de arranque de la imagen `ckan-dev` fuerza `debug = true` en
+      # cada boot, y eso activa el Flask-DebugToolbar, que publica la config
+      # entera de CKAN (credenciales de la base incluidas) a quien abra
+      # http://<host>:5000/ sin autenticarse. `/docker-entrypoint.d/` es el punto
+      # que corre DESPUÉS de esa línea y antes de levantar el servidor.
+      # Montado (y no sólo COPYeado en la imagen) para que aplique sin rebuild;
+      # el `COPY ... /docker-entrypoint.d/` del Dockerfile ya lo hornea para
+      # quien reconstruya.
+      - ./ckan-docker/ckan/docker-entrypoint.d/02_disable_debug_toolbar.sh:/docker-entrypoint.d/02_disable_debug_toolbar.sh:ro
 
   # ─── Frontend Vite dev server (HMR) ─────────────────────────
   frontend-dev:
