@@ -1,11 +1,11 @@
 # CKAN production image with the custom `umss` extension baked in.
 # Build context: the ckan-docker/ directory (so we can COPY both ckan/ and src/).
 #
-# Extends ckan/ckan-base:2.11 with:
+# Extends ckan/ckan-base:2.12 with:
 #   1. the ckanext-umss extension (pip-installed, no runtime deps)
 #   2. the standard ckan-docker additions (entrypoint scripts + patches)
 
-FROM ckan/ckan-base:2.11
+FROM ckan/ckan-base:2.12
 
 # Bake in the custom umss extension
 COPY --chown=ckan-sys:ckan-sys src/ckanext-umss ${SRC_DIR}/ckanext-umss

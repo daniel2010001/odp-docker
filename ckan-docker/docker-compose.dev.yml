@@ -3,7 +3,8 @@ volumes:
   pg_data:
   solr_data:
   pip_cache:
-  site_packages:
+  # Pinned to the interpreter: an old py3.10 volume mounted at the new path hides site-packages and CKAN fails to boot.
+  site_packages_py314:
   local_bin:
   home_dir:
 
@@ -28,7 +29,7 @@ services:
       - ckan_storage:/var/lib/ckan
       - ./src:/srv/app/src_extensions
       - pip_cache:/root/.cache/pip
-      - site_packages:/usr/local/lib/python3.10/site-packages
+      - site_packages_py314:/usr/local/lib/python3.14/site-packages
       - local_bin:/usr/local/bin
       - home_dir:/srv/app/
     restart: unless-stopped

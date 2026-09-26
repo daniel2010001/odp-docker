@@ -4,7 +4,7 @@
 # Difference vs Dockerfile.umss (production): editable install + the runtime
 # bind mount (./src:/srv/app/src_extensions) keeps the extension hot-reloadable.
 
-FROM ckan/ckan-dev:2.11
+FROM ckan/ckan-dev:2.12
 
 # Bake the umss extension (editable) so it's installed AND live-reloadable.
 # The egg-link points to /srv/app/src_extensions/ckanext-umss, which the
