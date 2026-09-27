@@ -263,10 +263,12 @@ def test_settings_without_an_environment_variable_keep_their_ini_value():
 def test_a_query_parameter_cannot_redirect_the_database(url):
     """The measured bypass: the path said `ckan_test`, the connection opened `ckandb`.
 
-    Under psycopg2, `...?database=ckandb` connected to `ckandb`, and
-    `...?dbname=ckandb` left two spellings of the setting, which psycopg2 rejects.
-    Neither may pass: `clean_db` drops every table in the database that is really
-    opened, not in the one the path names.
+    Neither spelling may pass, whatever the driver does with it: under SQLAlchemy 2.0.51
+    `...?database=ckandb` leaves two spellings of the setting (the path's `dbname` and the
+    query's `database`), which is ambiguous, and `...?dbname=ckandb` overrides the path, which
+    resolves to `ckandb`. One is refused for being unresolvable and the other for not being
+    test-scoped; `clean_db` drops every table in the database that is really opened, not in the
+    one the path names.
     """
     problems = unsafe_targets(config(**{"sqlalchemy.url": url}))
     assert len(problems) == 1
@@ -280,7 +282,14 @@ def test_an_innocent_query_parameter_is_accepted():
 
 
 def test_the_database_name_comes_from_the_driver_translation():
-    """White-box: the value below is the database `clean_db` would drop tables in."""
+    """White-box: the value below is the database `clean_db` would drop tables in.
+
+    The translation belongs to the driver, so the exact values are version-dependent: under
+    SQLAlchemy 2.0.51, which the 2.12 images ship, `dbname` overrides the path while `database`
+    coexists with it. What must not change is the outcome -- neither spelling resolves to a
+    test-scoped name -- and `test_a_query_parameter_cannot_redirect_the_database` pins that
+    outcome independently of the driver's internals.
+    """
     assert _database_name("postgresql://u:p@db/ckan_test") == "ckan_test"
-    assert _database_name("postgresql://u:p@db/ckan_test?database=ckandb") == "ckandb"
-    assert _database_name("postgresql://u:p@db/ckan_test?dbname=ckandb") == ""
+    assert _database_name("postgresql://u:p@db/ckan_test?database=ckandb") == ""
+    assert _database_name("postgresql://u:p@db/ckan_test?dbname=ckandb") == "ckandb"
