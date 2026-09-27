@@ -1,0 +1,15 @@
+--- a/ckan/views/user.py
++++ b/ckan/views/user.py
+@@ -199,7 +199,11 @@
+     def get(self, id: str) -> Union[Response, str]:
+         try:
+             tokens = logic.get_action('api_token_list')(
+-                {}, {'user': id}
++                # `expire_api_token`, bundled with CKAN, renders each token's expiry from
++                # `plugin_extras`, and `api_token_dictize` only includes it when this flag is in the
++                # context. CKAN 2.11's view set it; 2.12's dropped it, so this page returns 500 as
++                # soon as the user owns a single token. Restored until upstream fixes it.
++                {'include_plugin_extras': True}, {'user': id}
+             )
+         except logic.NotAuthorized:
+             base.abort(403, _('Unauthorized to view API tokens.'))

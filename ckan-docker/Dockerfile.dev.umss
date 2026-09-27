@@ -17,7 +17,15 @@ RUN pip3 install -e /srv/app/src_extensions/ckanext-umss
 COPY --chown=ckan-sys:ckan-sys ckan/docker-entrypoint.d/* /docker-entrypoint.d/
 COPY --chown=ckan-sys:ckan-sys ckan/patches ${APP_DIR}/patches
 
-USER ckan
+USER root
+
+# Two 2.12 permission characteristics, both from the same cause — the images ship the CKAN source
+# tree owned by `ckan-sys` with group read-only, and this image has to write to it:
+#   1. the patch loop below modifies `ckan/views/*`, and as the `ckan` user `patch` cannot even
+#      create its temp file in that directory (drwxr-xr-x) — the build fails.
+#   2. the dev entrypoint rewrites `test-core.ini` on every boot and hits
+#      `PermissionError: [Errno 13] Permission denied`.
+RUN chmod g+w ${SRC_DIR}/ckan/test-core.ini
 
 RUN for d in $APP_DIR/patches/*; do \
         if [ -d $d ]; then \
@@ -26,3 +34,5 @@ RUN for d in $APP_DIR/patches/*; do \
             done ; \
         fi ; \
     done
+
+USER ckan
