@@ -77,7 +77,10 @@ jobs:
           POSTGRES_DB: postgres
         options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
       redis:
-        image: redis:3
+        # Must track `REDIS_VERSION` in the compose files. CKAN 2.12's redis client sends HELLO
+        # (RESP3), which redis 3 answers with `unknown command 'HELLO'`: CKAN then logs
+        # "Could not connect to Redis" and runs the whole suite without a cache, silently.
+        image: redis:6
     env:
       CKAN_SQLALCHEMY_URL: postgresql://ckan_default:pass@postgres/ckan_test
       CKAN_DATASTORE_WRITE_URL: postgresql://datastore_write:pass@postgres/datastore_test
