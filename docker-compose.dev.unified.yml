@@ -42,6 +42,34 @@ services:
       # quien reconstruya.
       - ./ckan-docker/ckan/docker-entrypoint.d/02_disable_debug_toolbar.sh:/docker-entrypoint.d/02_disable_debug_toolbar.sh:ro
 
+    # ─── Andamiaje de DEV (homelab) — NO es el diseño de producción ───
+    # CKAN necesita un ORIGEN PROPIO para que el navegador pueda cargar sus
+    # recursos: el portal se sirve por `https://odp.hs.lan` y CKAN firmaba sus
+    # URLs absolutas con `http://192.168.1.201:5000`, así que el visor de PDF
+    # quedaba bloqueado por contenido mixto (`ResourcePreview.svelte` usa un
+    # `<iframe>` a propósito, porque la API no manda CORS).
+    #
+    # En PRODUCCIÓN los nombres son otros —`data.umss.edu.bo` para el portal y
+    # `api.data.umss.edu.bo` para CKAN, con otro proxy delante— así que esto es
+    # andamiaje del homelab y vive acá, en el compose de dev, y no en el del
+    # sub-stack. Lo único que viaja a producción es el INVARIANTE: `ckan.site_url`
+    # debe ser exactamente la URL pública de CKAN, con el mismo esquema que el
+    # portal (en dev, `https://api.odp.hs.lan`; en prod, `https://api.data.umss.edu.bo`).
+    #
+    # Caddy va directo al contenedor (sin el nginx intermedio): CKAN ignora el
+    # `Host` de la petición —arma sus URLs desde `ckan.site_url`— así que no hace
+    # falta que nadie elija upstream por nombre.
+    # OJO con la trampa del override: `networks` **REEMPLAZA** la lista del archivo
+    # incluido, no la amplía. Medido: con sólo `hs-net` acá, `ckan-dev` deja de
+    # resolver `db` y `solr` y el stack se cae. Por eso van las dos.
+    networks:
+      - default                     # db, solr, redis y el resto del stack
+      - hs-net                      # lo alcanza Caddy (homelab)
+    labels:
+      - "caddy=api.odp.hs.lan"
+      - "caddy.tls=internal"
+      - "caddy.reverse_proxy={{upstreams 5000}}"
+
   # ─── Frontend Vite dev server (HMR) ─────────────────────────
   frontend-dev:
     build:
