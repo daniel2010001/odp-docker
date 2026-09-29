@@ -309,6 +309,95 @@ def test_resource_create_is_allowed(scene):
     assert stored(scene["dataset"]["id"])["private"] is True
 
 
+# ---------------------------------------------------------------------------
+# S5 row 9 — what a partial update hands the chained rule (measured 2026-09-29)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def handed_to_the_rule(monkeypatch):
+    """The `data_dict` CKAN passes to the registered `package_update` chain.
+
+    The *registry* has to be wrapped, not the module attribute:
+    `chained_auth_function` registers a `functools.partial` bound to core's
+    decision (`ckan/authz.py`, the `partial(func, prev_func)` build), so
+    replacing `umss_auth.package_update` would intercept nothing. `AuthFunctions`
+    exposes only `get`/`clear`/`keys`, so what gets patched is the class-level
+    dict its own `get` reads; `monkeypatch` puts the original back at teardown,
+    and `get` is called first so the cache is built before it is read.
+
+    Only a non-sysadmin caller reaches the chain at all: `is_authorized` answers
+    success for a sysadmin before consulting it, and a context carrying
+    `ignore_auth` returns even earlier — which is why the fixture's own
+    `helpers.call_action` writes never touch this spy.
+    """
+    original = ckan.authz._AuthFunctions.get("package_update")
+    seen = {}
+
+    def spy(context, data_dict):
+        seen["data_dict"] = dict(data_dict)
+        return original(context, data_dict)
+
+    monkeypatch.setitem(
+        ckan.authz._AuthFunctions._functions, "package_update", spy
+    )
+    return seen
+
+
+def test_an_update_without_resources_keeps_them_and_hands_the_rule_none(
+    handed_to_the_rule,
+):
+    """CKAN 2.12, measured: the wizard's edit shape is safe, and why it is safe.
+
+    S5 row 9 of the upgrade carried an assumption that a rule chained onto
+    `package_update` sees *every* resource. On 2.12 the flattened data omits the
+    unchanged ones (#5713) and `allow_partial_update` is gone, so an edit that
+    omits `resources` no longer deletes them either. Both halves matter to the
+    portal's wizard, whose payload is the package dict with the resource list
+    dropped (`src/routes/dashboard/datasets/new/+page.svelte`).
+
+    Measured here rather than assumed: the chained function is handed the
+    **request payload**, so a rule that reads `private`/`state` — this one reads
+    only that — cannot depend on which resources the client sent. If a future
+    CKAN starts flattening stored resources into the `data_dict` an auth function
+    receives, the first assertion below is where it shows up; if one starts
+    deleting omitted resources, the last one is.
+    """
+    admin = factories.User()
+    org = factories.Organization()
+    add_user_member(org["id"], admin["id"], "admin")
+    dataset = factories.Dataset(owner_org=org["id"], private=True)
+    for name in ("one", "two"):
+        helpers.call_action(
+            "resource_create",
+            package_id=dataset["id"],
+            name=name,
+            url="https://example.invalid/%s.csv" % name,
+        )
+    before = stored(dataset["id"])
+    assert len(before["resources"]) == 2
+
+    # The wizard's shape: everything `package_show` answered, minus the resources.
+    payload = {
+        key: value
+        for key, value in before.items()
+        if key not in ("resources", "num_resources")
+    }
+    payload["title"] = "edited without sending resources"
+    # The fixture's own writes cannot reach the spy (`ignore_auth` short-circuits
+    # before the registry), but clearing makes the assertion below about this call
+    # alone rather than about whatever ran last.
+    handed_to_the_rule.clear()
+
+    call_as(admin, "package_update", **payload)
+
+    handed = handed_to_the_rule["data_dict"]
+    assert "resources" not in handed
+    after = stored(dataset["id"])
+    assert after["title"] == "edited without sending resources"
+    assert [resource["name"] for resource in after["resources"]] == ["one", "two"]
+
+
 def test_admin_of_a_parent_org_publishes_a_child_org_dataset():
     """The cascade in `Approver Capacity` is measured (design P10), so it is a
     test rather than an assumption: `has_user_permission_for_group_or_org` walks
