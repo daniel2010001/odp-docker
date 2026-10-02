@@ -50,11 +50,15 @@ COMPOSE_FILES=(
 	ckan-docker/docker-compose.dev.yml
 )
 
-# Every `image: redis:<tag>` in a file, one tag per line. Anchored on `image:` so a prose
-# mention of redis in a comment is not read as the service definition -- and the tag is
-# whatever follows the colon, so `${REDIS_VERSION}` comes out as itself.
+# Every live `image: redis:<tag>` in a file, one tag per line. Anchored at the start of the
+# line, leading indentation allowed, so a **commented** `# image: redis:3` is not read as a
+# service definition: the extraction is looking for a mapping key, and a comment is not one.
+# That anchoring is load-bearing -- measured, a stale comment about redis 3 used to trip the
+# floor on a tree whose live tag was fine. The tag is whatever follows the colon, so
+# `${REDIS_VERSION}` comes out as itself.
 redis_tags() { # file
-	grep -oE 'image:[[:space:]]*redis:[^[:space:]]+' "$1" | sed -E 's/^image:[[:space:]]*redis://'
+	grep -oE '^[[:space:]]*image:[[:space:]]*redis:[^[:space:]]+' "$1" \
+		| sed -E 's/^[[:space:]]*image:[[:space:]]*redis://'
 }
 
 # The leading numeric major of a tag, or nothing when there is none. `6-alpine` -> 6, `7` -> 7,
@@ -127,7 +131,7 @@ check_redis_floor() { # root
 
 # The single home. The compose files must point at `${REDIS_VERSION}`, not at a literal.
 check_redis_indirection() { # root
-	local root="$1" site file tag offenders=0 seen=0
+	local root="$1" site file tag offenders=0 seen=0 site_seen
 	for site in "${COMPOSE_FILES[@]}"; do
 		file="$root/$site"
 		if [ ! -f "$file" ]; then
@@ -135,8 +139,10 @@ check_redis_indirection() { # root
 			offenders=$((offenders + 1))
 			continue
 		fi
+		site_seen=0
 		while IFS= read -r tag; do
 			[ -n "$tag" ] || continue
+			site_seen=$((site_seen + 1))
 			seen=$((seen + 1))
 			if [ "$tag" != '${REDIS_VERSION}' ]; then
 				printf '  %s: image is `redis:%s`, a literal; it must be `redis:${REDIS_VERSION}` so\n' \
@@ -146,6 +152,14 @@ check_redis_indirection() { # root
 				offenders=$((offenders + 1))
 			fi
 		done < <(redis_tags "$file")
+		if [ "$site_seen" -eq 0 ]; then
+			# Per file, not in total. With one count across both files, the file that lost its
+			# redis service is covered for by its sibling -- and this rule would be certifying an
+			# indirection it never read in that file, which is the drift it exists to catch.
+			printf '  %s: no redis image in this file, so the single home cannot be verified here\n' \
+				"$site"
+			offenders=$((offenders + 1))
+		fi
 	done
 	if [ "$seen" -eq 0 ]; then
 		printf '  no redis image found in the compose files: an empty extraction is not a pass\n'
@@ -162,6 +176,15 @@ check_redis_indirection() { # root
 }
 
 WORK="$(mktemp -d)"
+# A fixture root that is not a directory turns every path below into an absolute one.
+# Measured, with a failing `mktemp` the fixtures targeted `/old`, `/at-6`, ...: the suite then
+# failed in cascade blaming its own assertions, and the cause appeared only on stderr. Fail
+# closed here, while the cause is still nameable, instead of measuring something else.
+if [ -z "$WORK" ] || [ ! -d "$WORK" ]; then
+	printf '  FAIL mktemp -d gave no usable directory (got [%s]): the fixtures would land on\n' "$WORK"
+	printf '       absolute paths and the suite would not be measuring what it prints\n'
+	exit 1
+fi
 trap 'rm -rf "$WORK"' EXIT
 
 failures=0
@@ -178,6 +201,35 @@ assert_contains() { # label haystack needle
 	*"$3"*) ok "$1" ;;
 	*) notok "$1 (missing [$3] in [$2])" ;;
 	esac
+}
+
+# The positive case has to be about the real tree, so this takes its root instead of reading a
+# fixture. It deliberately does NOT pin the tag the file happens to hold today: measured, the
+# pinned literal `6` made a legitimate bump to `redis:7` fail with `missing [6]`, which trains a
+# maintainer to distrust a correct change. The bump and below-the-floor cases below are what
+# keep this from collapsing into "any tag passes".
+CI_TAG_STATE=
+CI_TAG_READ=
+read_ci_tag() { # root
+	local tag major
+	tag="$(redis_tags "$1/$CI_FILE")"
+	CI_TAG_READ="redis:$tag"
+	if [ -z "$tag" ]; then
+		CI_TAG_STATE=1
+		CI_TAG_READ="$CI_TAG_READ (no site read at all)"
+		return
+	fi
+	major="$(major_of "$tag")"
+	if [ -z "$major" ]; then
+		CI_TAG_STATE=1
+		CI_TAG_READ="$CI_TAG_READ (not a numeric major this check can read)"
+	elif [ "$major" -lt "$REDIS_FLOOR" ]; then
+		CI_TAG_STATE=1
+		CI_TAG_READ="$CI_TAG_READ (below the floor of major $REDIS_FLOOR)"
+	else
+		CI_TAG_STATE=0
+		CI_TAG_READ="$CI_TAG_READ (major $major >= $REDIS_FLOOR)"
+	fi
 }
 
 CHECK_OUT=
@@ -210,7 +262,8 @@ run_check check_redis_floor "$REPO_ROOT"
 assert_eq "the CI redis is at or above the floor" "0" "$CHECK_STATUS"
 run_check check_redis_indirection "$REPO_ROOT"
 assert_eq "the compose files use \${REDIS_VERSION}" "0" "$CHECK_STATUS"
-assert_contains "the CI tag is read as a version" "$(redis_tags "$REPO_ROOT/$CI_FILE")" "6"
+read_ci_tag "$REPO_ROOT"
+assert_eq "the CI tag is read as a version: $CI_TAG_READ" "0" "$CI_TAG_STATE"
 assert_contains "the compose tag is read as the variable" \
 	"$(redis_tags "$REPO_ROOT/${COMPOSE_FILES[0]}")" '${REDIS_VERSION}'
 
@@ -228,12 +281,44 @@ for tag in 6 6-alpine 7 7.2-alpine; do
 	assert_eq "redis:$tag passes" "0" "$CHECK_STATUS"
 done
 
+echo "the CI tag is read as a major, not as the literal it holds today"
+make_tree "$WORK/bumped" "7" '${REDIS_VERSION}'
+read_ci_tag "$WORK/bumped"
+assert_eq "a legitimate bump to a newer major stays green: $CI_TAG_READ" "0" "$CI_TAG_STATE"
+make_tree "$WORK/below" "3" '${REDIS_VERSION}'
+read_ci_tag "$WORK/below"
+assert_eq "a tag below the floor is still rejected: $CI_TAG_READ" "1" "$CI_TAG_STATE"
+
+echo "a commented redis line is not a site"
+make_tree "$WORK/commented" "6" '${REDIS_VERSION}'
+cat > "$WORK/commented/$CI_FILE" <<'EOF'
+container:
+  image: ckan/ckan-dev:2.12
+services:
+  redis:
+    # image: redis:3, kept for reference: a comment cannot run
+    image: redis:6
+EOF
+run_check check_redis_floor "$WORK/commented"
+assert_eq "a commented tag does not trip the floor" "0" "$CHECK_STATUS"
+assert_contains "only the live site is counted" "$CHECK_OUT" "1 redis reference(s)"
+
 echo "a compose literal fails, because it bypasses the variable"
 make_tree "$WORK/literal" "6" "6"
 run_check check_redis_indirection "$WORK/literal"
 assert_eq "the indirection rule rejects a literal" "1" "$CHECK_STATUS"
 assert_contains "the literal is named" "$CHECK_OUT" 'image is `redis:6`, a literal'
 assert_contains "the fix is named" "$CHECK_OUT" 'redis:${REDIS_VERSION}'
+
+echo "a compose file that lost its redis service fails on its own"
+make_tree "$WORK/lost" "6" '${REDIS_VERSION}'
+# The sibling still points at the variable: with one count across both files, this one is
+# covered for by its neighbour and the drift stays invisible, which is the whole point.
+printf 'services:\n  web:\n    image: nginx:alpine\n' > "$WORK/lost/${COMPOSE_FILES[1]}"
+run_check check_redis_indirection "$WORK/lost"
+assert_eq "the indirection rule rejects a compose without redis" "1" "$CHECK_STATUS"
+assert_contains "the file that lost the service is named" "$CHECK_OUT" \
+	"${COMPOSE_FILES[1]}: no redis image"
 
 echo "a CI tag that is a variable cannot be read, and fails closed"
 make_tree "$WORK/variable" '${REDIS_VERSION}' '${REDIS_VERSION}'
