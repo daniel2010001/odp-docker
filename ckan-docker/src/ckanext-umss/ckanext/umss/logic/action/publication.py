@@ -3,8 +3,12 @@ The five publication actions: `design.md` D4, and the door of D5.
 
 They are the queue and the door at once: `publication_request_create` /
 `_cancel` / `_decide` / `_list` are the queue, and `_decide {approve: true}` and
-`publication_publish` are the **only** way a dataset becomes public — the wall in
-`ckanext.umss.auth` refuses every other flip, including an org admin's.
+`publication_publish` are the only **recorded** way a dataset becomes public.
+The wall in `ckanext.umss.auth` refuses a flip by a caller who is neither an
+organization admin nor a sysadmin, but it does **not** close the stock
+`package_patch {private: false}` route for an organization admin — that caller
+is an approver to the wall — so a raw core call is a second, unrecorded door
+until `A3` closes it.
 
 `_decide {approve: true}` and `_publish` write the record **and** flip the value
 in one transaction (D5): the row is added to the session and `package_patch` is

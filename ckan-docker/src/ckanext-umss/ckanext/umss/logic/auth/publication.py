@@ -106,8 +106,9 @@ def _requester_holds_capacity(row):
     `has_user_permission_for_group_or_org` resolves a username, so the id is
     resolved to the user first.
 
-    Fails closed: an unresolvable requester (a deleted user) and a dataset with
-    no resolvable owner both answer `False`. The escape hatch when the
+    Fails closed: a requester whose id has **no user row at all** — `model.User.get`,
+    which does not filter on `state`, so a soft-deleted user still resolves — and a
+    dataset with no resolvable owner both answer `False`. The escape hatch when the
     requester is gone or degraded is the sysadmin's `publication_publish`, which
     annuls the pending row and publishes in the same act — never an open
     decision.
@@ -160,10 +161,11 @@ def publication_request_decide(context, data_dict):
     A2.6 also re-checks the requester's **current** capacity against the
     dataset's **current** owning organization, mirrored from
     `publication_request_create`'s predicate. That check has no sysadmin
-    exception either, so it runs before the sysadmin branch; and an
-    unresolvable requester (a deleted user) fails closed rather than opening
-    the decision. The refusal is an authorization failure, so the action never
-    runs and the row stays `pending` — it is **not** annulled: the two
+    exception either, so it runs before the sysadmin branch; and a requester
+    whose id has **no user row at all** fails closed rather than opening
+    the decision (a soft-deleted user still resolves: `model.User.get` does not
+    filter on `state`). The refusal is an authorization failure, so the action
+    never runs and the row stays `pending` — it is **not** annulled: the two
     annulment triggers are the deleted dataset and the other publish path.
 
     `auth_sysadmins_check` is load-bearing, not decoration. Without it CKAN

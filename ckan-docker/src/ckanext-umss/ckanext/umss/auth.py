@@ -6,6 +6,13 @@ enforces that inside CKAN's authorization layer, so the refusal happens before
 validation and before persistence, and it applies to the API, CKAN's own web UI
 and the portal alike.
 
+What this wall does **not** close: it refuses a caller who is neither an
+organization ``admin`` nor a ``sysadmin``, but an organization ``admin`` is an
+approver here. That caller keeps the stock ``package_patch {private: false}``
+route, and can also request a ``state`` change through it. The spec's
+``No Other Visibility Path`` requirement covers both, and closing them is a
+later unit (``A3``), not this module.
+
 The two functions below are *chained* onto core (`toolkit.chained_auth_function`)
 rather than replacing it. Core's ``package_update`` auth is not trivial — owner-org
 capacity, the unowned-dataset config path, optional collaborator fallback and

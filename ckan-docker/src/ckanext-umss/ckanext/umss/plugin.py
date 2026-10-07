@@ -27,9 +27,13 @@ class UmssPlugin(plugins.SingletonPlugin):
     # IActions
 
     def get_actions(self):
-        """The queue and the door (D4). The door is the only way a dataset
-        becomes public, because the wall in `ckanext.umss.auth` refuses every
-        other flip.
+        """The queue and the door (D4). `publication_decide {approve: true}` and
+        `publication_publish` are the only **recorded** way a dataset becomes
+        public. The wall in `ckanext.umss.auth` refuses a flip by a caller who
+        is neither an organization admin nor a sysadmin, but it does **not**
+        close the stock `package_patch {private: false}` route for an
+        organization admin — that caller is an approver to the wall — so a raw
+        core call is a second, unrecorded door until `A3` closes it.
         """
         return {
             "publication_request_create": publication_actions.publication_request_create,
