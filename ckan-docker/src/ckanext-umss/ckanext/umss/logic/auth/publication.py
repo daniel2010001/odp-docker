@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ckan.authz as ckan_authz
 import ckan.model as model
+import ckan.plugins.toolkit as toolkit
 
 from ckanext.umss import model as umss_model
 
@@ -33,6 +34,8 @@ __all__ = [
     "REQUEST_DENIED_MSG",
     "CANCEL_DENIED_MSG",
     "DECIDE_DENIED_MSG",
+    "DECIDE_FOUR_EYES_MSG",
+    "DECIDE_REQUESTER_CAPACITY_MSG",
     "PUBLISH_DENIED_MSG",
 ]
 
@@ -50,8 +53,15 @@ CANCEL_DENIED_MSG = (
 DECIDE_DENIED_MSG = (
     "Only an organization administrator may decide a publication request"
 )
+DECIDE_FOUR_EYES_MSG = (
+    "Four eyes: the approver cannot be the requester of the request they decide"
+)
+DECIDE_REQUESTER_CAPACITY_MSG = (
+    "The requester no longer has permission to update this dataset, so the "
+    "request cannot be decided"
+)
 PUBLISH_DENIED_MSG = (
-    "Only an organization administrator may publish a dataset directly"
+    "Only a sysadmin may publish a dataset directly"
 )
 ALREADY_PUBLIC_MSG = "That dataset is already public"
 
@@ -85,6 +95,35 @@ def _allowed(context, org_id, permission):
     )
 
 
+def _requester_holds_capacity(row):
+    """Whether the requester **currently** holds what `create` demands for the
+    request's dataset.
+
+    `publication_request_create` requires the `update_dataset` permission on
+    the dataset's owning organization; this mirrors that predicate, evaluated
+    against the dataset's **current** owner and the **requester's** identity
+    rather than the caller's. `row.requested_by` is a user id, and
+    `has_user_permission_for_group_or_org` resolves a username, so the id is
+    resolved to the user first.
+
+    Fails closed: a requester whose id has **no user row at all** — `model.User.get`,
+    which does not filter on `state`, so a soft-deleted user still resolves — and a
+    dataset with no resolvable owner both answer `False`. The escape hatch when the
+    requester is gone or degraded is the sysadmin's `publication_publish`, which
+    annuls the pending row and publishes in the same act — never an open
+    decision.
+    """
+    if not row.requested_by:
+        return False
+    requester = model.User.get(row.requested_by)
+    owner_org = _org_id_of_dataset(row.dataset_id)
+    if requester is None or not owner_org:
+        return False
+    return ckan_authz.has_user_permission_for_group_or_org(
+        owner_org, requester.name, UPDATE_PERMISSION
+    )
+
+
 def publication_request_create(context, data_dict):
     """D4: a caller who can `update_dataset` in the owning org, on a private
     dataset."""
@@ -111,22 +150,73 @@ def publication_request_cancel(context, data_dict):
     return {"success": False, "msg": CANCEL_DENIED_MSG}
 
 
+@toolkit.auth_sysadmins_check
 def publication_request_decide(context, data_dict):
-    """D4: an org `admin` (and a sysadmin, through the stock short-circuit)."""
+    """D4, plus the governance amendment's four eyes and state re-check.
+
+    An org `admin` decides for someone else. Four eyes: the requester cannot
+    decide their own request, and sysadmins have no exception — the sanctioned
+    path for a sysadmin who requested is `publication_publish`.
+
+    A2.6 also re-checks the requester's **current** capacity against the
+    dataset's **current** owning organization, mirrored from
+    `publication_request_create`'s predicate. That check has no sysadmin
+    exception either, so it runs before the sysadmin branch; and a requester
+    whose id has **no user row at all** fails closed rather than opening
+    the decision (a soft-deleted user still resolves: `model.User.get` does not
+    filter on `state`). The refusal is an authorization failure, so the action
+    never runs and the row stays `pending` — it is **not** annulled: the two
+    annulment triggers are the deleted dataset and the other publish path.
+
+    `auth_sysadmins_check` is load-bearing, not decoration. Without it CKAN
+    short-circuits every sysadmin to success *before* this function runs
+    (`ckan/authz.py:224-228`), leaving the rule written, green and hollow for
+    exactly the caller it does not exempt. With it, the function runs for a
+    sysadmin too, so it must answer for that caller explicitly.
+    """
     row = _request_row(data_dict.get("request_id"))
     if row is None:
         return {"success": True}
+
+    caller = _user_id(context)
+    is_requester = bool(row.requested_by) and row.requested_by == caller
+
+    # A2.6, requester half: the decision re-checks the requester's **current**
+    # capacity, and it has no sysadmin exception — it is placed before the
+    # sysadmin branch below so a sysadmin approver is subject to it too. The
+    # escape hatch for a degraded requester is `publication_publish`.
+    if not _requester_holds_capacity(row):
+        return {"success": False, "msg": DECIDE_REQUESTER_CAPACITY_MSG}
+
+    if ckan_authz.is_sysadmin(context.get("user")):
+        if is_requester:
+            return {"success": False, "msg": DECIDE_FOUR_EYES_MSG}
+        return {"success": True}
+
     if not _allowed(context, _org_id_of_dataset(row.dataset_id), ADMIN_PERMISSION):
         return {"success": False, "msg": DECIDE_DENIED_MSG}
+    if is_requester:
+        return {"success": False, "msg": DECIDE_FOUR_EYES_MSG}
     return {"success": True}
 
 
 def publication_publish(context, data_dict):
-    """D4: an org `admin` publishing on their own authority."""
+    """The governance amendment: a sysadmin publishing on their own authority.
+
+    The organization-admin direct path through this action is closed. The org
+    admin keeps the stock `package_patch {private: false}` route, which the wall
+    in `ckanext.umss.auth` owns; this action is a sysadmin's.
+
+    The dataset is resolved first, because contract rule 7 requires an
+    unresolvable `dataset_id` to answer `NotFound`, not `403`: the auth answers
+    `success` for an unknown id and the action raises `NotFound`
+    (R1-ORPHAN-ROW). Only the capacity predicate below narrows the caller to a
+    sysadmin.
+    """
     dataset = model.Package.get(data_dict.get("dataset_id") or "")
     if dataset is None:
         return {"success": True}
-    if not _allowed(context, dataset.owner_org, ADMIN_PERMISSION):
+    if not ckan_authz.is_sysadmin(context.get("user")):
         return {"success": False, "msg": PUBLISH_DENIED_MSG}
     return {"success": True}
 

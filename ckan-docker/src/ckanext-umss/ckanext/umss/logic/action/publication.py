@@ -3,8 +3,12 @@ The five publication actions: `design.md` D4, and the door of D5.
 
 They are the queue and the door at once: `publication_request_create` /
 `_cancel` / `_decide` / `_list` are the queue, and `_decide {approve: true}` and
-`publication_publish` are the **only** way a dataset becomes public — the wall in
-`ckanext.umss.auth` refuses every other flip, including an org admin's.
+`publication_publish` are the only **recorded** way a dataset becomes public.
+The wall in `ckanext.umss.auth` refuses a flip by a caller who is neither an
+organization admin nor a sysadmin, but it does **not** close the stock
+`package_patch {private: false}` route for an organization admin — that caller
+is an approver to the wall — so a raw core call is a second, unrecorded door
+until `A3` closes it.
 
 `_decide {approve: true}` and `_publish` write the record **and** flip the value
 in one transaction (D5): the row is added to the session and `package_patch` is
@@ -37,6 +41,11 @@ __all__ = [
 
 _Session = model.Session
 
+# Rule 3's neutral fallback: an id that is set but does not resolve to a user
+# answers this token, never the raw id. A field called `..._name` must never
+# contain an id.
+UNKNOWN_NAME = "unknown"
+
 
 def _now():
     return datetime.datetime.now()
@@ -68,9 +77,48 @@ def _caller_id(context):
     return user.id if user else None
 
 
-def _row_dict(row):
-    """The row as the API will answer it: the declared columns, keyed by name."""
-    return {column.name: getattr(row, column.name) for column in row.__table__.columns}
+def _names_for(user_ids):
+    """Resolve a call's user ids to names in **one** query (rule 3).
+
+    The queue must not resolve N users per page, so the caller collects every
+    `requested_by`/`approved_by` in the page and hands them here once; the
+    `IN` carries them all. Empty ids are dropped — the caller still decides the
+    fallback for an id that is set but does not resolve.
+    """
+    ids = {user_id for user_id in user_ids if user_id}
+    if not ids:
+        return {}
+    return {
+        user_id: name
+        for user_id, name in _Session.query(model.User.id, model.User.name)
+        .filter(model.User.id.in_(ids))
+        .all()
+    }
+
+
+def _name_key(user_id, names):
+    """One id column's presentation name, with rule 3's two empties distinct:
+    an unset column answers `None`, a set-but-unresolvable id answers
+    `"unknown"` (never the id)."""
+    if not user_id:
+        return None
+    return names.get(user_id, UNKNOWN_NAME)
+
+
+def _row_dict(row, names=None):
+    """The row as the API will answer it: the declared columns, keyed by name,
+    plus the two presentation names (rule 3).
+
+    `names` is the batched resolution for the whole call (`_names_for`); when it
+    is omitted — a single-row return — both id columns are resolved here in one
+    query, so one row and a whole page answer the same shape at the same cost.
+    """
+    data = {column.name: getattr(row, column.name) for column in row.__table__.columns}
+    if names is None:
+        names = _names_for((row.requested_by, row.approved_by))
+    data["requested_by_name"] = _name_key(row.requested_by, names)
+    data["approved_by_name"] = _name_key(row.approved_by, names)
+    return data
 
 
 def _request_row(request_id):
@@ -172,6 +220,13 @@ def publication_request_decide(context, data_dict):
             {"request_id": ["That request is no longer pending"]}
         )
 
+    if not approve:
+        comments = data_dict.get("comments")
+        if not isinstance(comments, str) or not comments.strip():
+            raise toolkit.ValidationError(
+                {"comments": ["Missing value: a rejection must carry a comment"]}
+            )
+
     if data_dict.get("comments"):
         row.comments = data_dict["comments"]
     row.approved_by = _caller_id(context)
@@ -187,11 +242,11 @@ def publication_request_decide(context, data_dict):
 
 
 def publication_publish(context, data_dict):
-    """D4's admin path: one row, born already decided and consumed.
+    """The sysadmin's recorded path: one row, born already decided and consumed.
 
     A pending request for the same dataset is **annulled**, not cancelled: the
-    requester did not withdraw it, a direct admin action made it moot — which is
-    what D2 added `annulled` for.
+    requester did not withdraw it, a direct action by the sysadmin made it moot —
+    which is what D2 added `annulled` for.
     """
     toolkit.check_access("publication_publish", context, data_dict)
     dataset_id = _required(data_dict, "dataset_id")
@@ -204,6 +259,7 @@ def publication_publish(context, data_dict):
     if moot is not None:
         moot.status = umss_model.ANNULLED
         moot.decided_at = now
+        moot.motive = umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH
 
     row = umss_model.PublicationRequest(
         dataset_id=dataset_id,
@@ -233,11 +289,17 @@ def publication_request_list(context, data_dict):
     rows = query.order_by(umss_model.PublicationRequest.created_at).all()
 
     caller = _caller_id(context)
-    return [
-        _row_dict(row)
+    visible = [
+        row
         for row in rows
         if row.requested_by == caller or _may_see(context, row.dataset_id)
     ]
+    names = _names_for(
+        user_id
+        for row in visible
+        for user_id in (row.requested_by, row.approved_by)
+    )
+    return [_row_dict(row, names) for row in visible]
 
 
 def _may_see(context, dataset_id):

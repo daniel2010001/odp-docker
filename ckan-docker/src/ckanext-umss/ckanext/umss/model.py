@@ -30,7 +30,13 @@ import ckan.model.types as _types
 from ckan.model.base import BaseModel
 
 
-__all__ = ["PublicationRequest", "STATUSES", "VISIBILITIES"]
+__all__ = [
+    "PublicationRequest",
+    "STATUSES",
+    "VISIBILITIES",
+    "MOTIVE_DATASET_DELETED",
+    "MOTIVE_PUBLISHED_BY_ANOTHER_PATH",
+]
 
 
 # The five outcomes D2 declares. `annulled` is the mining's addition: it marks a
@@ -46,6 +52,13 @@ STATUSES = (PENDING, APPROVED, REJECTED, CANCELLED, ANNULLED)
 
 # The two visibilities a request may ask for (D2).
 VISIBILITIES = ("public", "private")
+
+# The two triggers that annul a pending request whose object is gone, in this
+# cut (A2.7), as stable tokens: `motive` is the column that records why. English,
+# lowercase, one token each, so the contract can name them and the portal does
+# not have to guess.
+MOTIVE_DATASET_DELETED = "dataset_deleted"
+MOTIVE_PUBLISHED_BY_ANOTHER_PATH = "published_by_another_path"
 
 
 def one_of(column, values):

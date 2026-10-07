@@ -24,6 +24,7 @@ The contract these tests pin, for the portal that consumes it:
 rest of CKAN follows (`package_show` answers `creator_user_id`, not a name).
 """
 import pytest
+import sqlalchemy as sa
 
 import ckan.model as ckan_model
 import ckan.plugins.toolkit as toolkit
@@ -31,6 +32,7 @@ from ckan.tests import factories, helpers
 
 from ckanext.umss import model as umss_model
 from ckanext.umss.logic.action import publication as actions
+from ckanext.umss.logic.auth import publication as auth_publication
 
 
 pytestmark = [
@@ -230,6 +232,54 @@ def test_decide_rejecting_leaves_the_dataset_private(scene, store):
     assert stored(scene["dataset"]["id"])["private"] is True
 
 
+def test_decide_rejecting_without_comments_is_a_validation_error(scene, store):
+    """The governance amendment: a rejection must carry a comment, and the
+    failure is a `ValidationError` — the spec separates validation from the
+    authorization refusal."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.ValidationError) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=False,
+        )
+
+    assert "comments" in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_decide_rejecting_with_blank_comments_is_a_validation_error(scene, store):
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.ValidationError):
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=False,
+            comments="   ",
+        )
+
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_decide_approving_without_comments_still_works(scene, store):
+    """`comments` is optional when approving; only the rejection requires it."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    decided = call_as(
+        scene["admin"],
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+
+
 def test_decide_approving_records_the_decision_and_flips_in_the_same_call(scene, store):
     created = call_as(
         scene["editor"], "publication_request_create", dataset_id=scene["dataset"]["id"]
@@ -249,9 +299,10 @@ def test_decide_approving_records_the_decision_and_flips_in_the_same_call(scene,
 
 
 def test_publish_writes_and_consumes_the_row_in_the_act(scene, store):
-    """D4's admin path: no queue, one row that is born already decided."""
+    """D4's sysadmin path: no queue, one row that is born already decided."""
+    sysadmin = factories.Sysadmin()
     published = call_as(
-        scene["admin"],
+        sysadmin,
         "publication_publish",
         dataset_id=scene["dataset"]["id"],
         comments="lo publico yo",
@@ -260,8 +311,8 @@ def test_publish_writes_and_consumes_the_row_in_the_act(scene, store):
     row = the_row(scene["dataset"]["id"])
     assert published["status"] == "approved"
     assert row.status == "approved"
-    assert row.requested_by == scene["admin"]["id"]
-    assert row.approved_by == scene["admin"]["id"]
+    assert row.requested_by == sysadmin["id"]
+    assert row.approved_by == sysadmin["id"]
     assert row.decided_at is not None
     assert row.consumed_at is not None
     assert stored(scene["dataset"]["id"])["private"] is False
@@ -269,13 +320,32 @@ def test_publish_writes_and_consumes_the_row_in_the_act(scene, store):
 
 def test_publish_annuls_a_pending_request_instead_of_leaving_it_open(scene, store):
     """`annulled` is what D2 added it for, and it is not `cancelled`: the
-    requester did not withdraw it — a direct admin action made it moot."""
+    requester did not withdraw it — a direct sysadmin action made it moot.
+
+    The pending row records **why** (`motive`), and the direct publish writes
+    **one** new row: the pending one is annulled, never turned into a second
+    `approved`."""
     request_for(scene["editor"], scene["dataset"]["id"])
 
-    call_as(scene["admin"], "publication_publish", dataset_id=scene["dataset"]["id"])
+    call_as(
+        factories.Sysadmin(),
+        "publication_publish",
+        dataset_id=scene["dataset"]["id"],
+    )
 
-    statuses = sorted(r.status for r in rows() if r.dataset_id == scene["dataset"]["id"])
+    for_dataset = [r for r in rows() if r.dataset_id == scene["dataset"]["id"]]
+    statuses = sorted(r.status for r in for_dataset)
     assert statuses == ["annulled", "approved"]
+    assert len(for_dataset) == 2
+
+    annulled = [r for r in for_dataset if r.status == umss_model.ANNULLED]
+    approved = [r for r in for_dataset if r.status == umss_model.APPROVED]
+    assert len(annulled) == 1
+    assert len(approved) == 1, "the direct publish must not write a second approval"
+    assert annulled[0].status != umss_model.CANCELLED
+    assert annulled[0].motive is not None
+    assert annulled[0].motive == umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH
+    assert annulled[0].decided_at is not None
     assert stored(scene["dataset"]["id"])["private"] is False
 
 
@@ -288,6 +358,7 @@ def test_list_filters_by_status(scene, store):
         "publication_request_decide",
         request_id=rejected["id"],
         approve=False,
+        comments="no",
     )
 
     every = call_as(scene["admin"], "publication_request_list")
@@ -335,6 +406,43 @@ def test_an_editor_cannot_publish(scene, store):
     assert stored(scene["dataset"]["id"])["private"] is True
 
 
+def test_an_org_admin_cannot_publish_directly(scene, store):
+    """The governance amendment. `publication_publish` is sysadmin-only; the
+    org admin keeps only the stock `package_patch {private: false}` route, which
+    the wall (`ckanext.umss.auth`) owns, not this action."""
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_publish",
+            dataset_id=scene["dataset"]["id"],
+        )
+
+    assert "sysadmin" in str(excinfo.value).lower()
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert rows() == []
+
+
+def test_a_sysadmin_can_publish(scene, store):
+    """Positive control, not a discriminating test: this passes under the old
+    org-admin-grants-publish code too, because CKAN short-circuits a sysadmin to
+    success. It guards the amendment against over-narrowing — the action must
+    not be closed to a sysadmin — but the change itself is proven by
+    `test_an_org_admin_cannot_publish_directly`."""
+    sysadmin = factories.Sysadmin()
+    published = call_as(
+        sysadmin,
+        "publication_publish",
+        dataset_id=scene["dataset"]["id"],
+        comments="por el sysadmin",
+    )
+
+    row = the_row(scene["dataset"]["id"])
+    assert published["status"] == "approved"
+    assert row.requested_by == sysadmin["id"]
+    assert row.approved_by == sysadmin["id"]
+    assert stored(scene["dataset"]["id"])["private"] is False
+
+
 def test_a_member_cannot_create(scene, store):
     """D4 asks for a caller who can `update_dataset`; a member cannot."""
     refused(scene["member"], "publication_request_create", dataset_id=scene["dataset"]["id"])
@@ -357,17 +465,23 @@ def test_the_requester_can_cancel_their_own_request(scene, store):
     assert cancelled["status"] == "cancelled"
 
 
-def test_an_org_admin_can_decide_and_publish(scene, store):
-    """The two authorities D4 grants an org admin: deciding for someone else,
-    and publishing on their own (the direct path, `RF-15` step 5)."""
+def test_an_org_admin_can_decide_but_not_publish(scene, store):
+    """The governance amendment narrows D4: an org admin still decides for
+    someone else, but `publication_publish` is no longer an org-admin authority.
+    The direct publish is a sysadmin's (`test_a_sysadmin_can_publish`)."""
     created = request_for(scene["editor"], scene["dataset"]["id"])
     decided = call_as(
         scene["admin"], "publication_request_decide", request_id=created["id"], approve=True
     )
     assert decided["status"] == "approved"
 
-    call_as(scene["admin"], "publication_publish", dataset_id=scene["second_dataset"]["id"])
-    assert stored(scene["second_dataset"]["id"])["private"] is False
+    with pytest.raises(toolkit.NotAuthorized):
+        call_as(
+            scene["admin"],
+            "publication_publish",
+            dataset_id=scene["second_dataset"]["id"],
+        )
+    assert stored(scene["second_dataset"]["id"])["private"] is True
 
 
 def test_an_admin_cannot_publish_in_an_organization_they_do_not_administer(scene, store):
@@ -413,6 +527,63 @@ def test_the_child_orgs_own_admin_can_decide(suborg_scene, store):
         approve=True,
     )
     assert decided["status"] == "approved"
+
+
+def test_the_requester_cannot_decide_their_own_request(scene, store):
+    """Four eyes: an org admin who opened the request cannot approve it, and the
+    refusal is not a silent no-op — the row stays `pending`."""
+    created = request_for(scene["admin"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert "four eyes" in str(excinfo.value).lower()
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_a_sysadmin_can_decide_someone_elses_request(scene, store):
+    """Positive control, not a discriminating test: this passes under the old
+    code too, through the stock sysadmin short-circuit. With
+    `auth_sysadmins_check` now forcing the function to run for a sysadmin, it
+    guards against the function over-narrowing; the flag's real proof is
+    `test_a_sysadmin_cannot_decide_their_own_request`."""
+    sysadmin = factories.Sysadmin()
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    decided = call_as(
+        sysadmin,
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+    assert stored(scene["dataset"]["id"])["private"] is False
+
+
+def test_a_sysadmin_cannot_decide_their_own_request(scene, store):
+    """Four eyes has no sysadmin exception: the requester is refused even as a
+    sysadmin, whose sanctioned path is `publication_publish`."""
+    sysadmin = factories.Sysadmin()
+    created = request_for(sysadmin, scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            sysadmin,
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert "four eyes" in str(excinfo.value).lower()
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert the_row(scene["dataset"]["id"]).status == "pending"
 
 
 def test_list_returns_only_what_the_caller_may_see(scene, store):
@@ -478,7 +649,11 @@ def test_a_failed_flip_on_publish_leaves_the_pending_request_untouched(
     request_for(scene["editor"], scene["dataset"]["id"])
 
     with pytest.raises(toolkit.ValidationError):
-        call_as(scene["admin"], "publication_publish", dataset_id=scene["dataset"]["id"])
+        call_as(
+            factories.Sysadmin(),
+            "publication_publish",
+            dataset_id=scene["dataset"]["id"],
+        )
 
     row = the_row(scene["dataset"]["id"])
     assert row.status == "pending"
@@ -508,6 +683,528 @@ def test_create_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
 def test_publish_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
     """The same hole lived in the other writing action."""
     with pytest.raises(toolkit.ObjectNotFound):
-        call_as(scene["admin"], "publication_publish", dataset_id="no-such-dataset")
+        call_as(
+            factories.Sysadmin(),
+            "publication_publish",
+            dataset_id="no-such-dataset",
+        )
 
     assert rows() == []
+
+
+def test_a_non_sysadmin_gets_not_found_for_an_unknown_dataset(scene, store):
+    """Contract rule 7: an unresolvable `dataset_id` answers `NotFound`, not
+    `403` — for a non-sysadmin too. The auth function resolves the id first and
+    defers existence to the action; the capacity predicate narrows *who* may
+    publish, it does not pre-empt *whether the thing exists*."""
+    with pytest.raises(toolkit.ObjectNotFound):
+        call_as(
+            scene["admin"],
+            "publication_publish",
+            dataset_id="no-such-dataset",
+        )
+
+    assert rows() == []
+
+
+# ---------------------------------------------------------------------------
+# A2.6 / A2.7 — the decision re-checks the current state, and a pending request
+# whose object is gone is annulled
+#
+# A2.7 has exactly two triggers: the dataset deleted, or published by another
+# path. The requester losing capacity is **not** one of them: the decision is
+# refused as an authorization failure and the row stays `pending` (the author's
+# decision, 2026-10-07). `annulled` and `cancelled` stay distinct throughout:
+# the requester did not withdraw.
+# ---------------------------------------------------------------------------
+
+
+def revoke_membership(org_id, user_id):
+    return helpers.call_action(
+        "member_delete", id=org_id, object=user_id, object_type="user"
+    )
+
+
+def test_the_motive_tokens_are_the_interface_values():
+    """The `motive` values are a **cross-repository interface**: the portal and
+    the tracked contract match on the exact strings, while every other test
+    here compares against the Python constants. A consistent typo in a
+    constant's value would pass all of those and still break the consumer, so
+    this is the one place that pins the literals. It is a pin, not a RED: it
+    passes against the constants as first written.
+    """
+    assert umss_model.MOTIVE_DATASET_DELETED == "dataset_deleted"
+    assert (
+        umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH == "published_by_another_path"
+    )
+
+
+def test_decide_re_checks_the_owning_organization_at_decision_time(scene, store):
+    """A2.6, owner half — a **regression pin**, not a TDD proof.
+
+    This passes at the commit this cut started from (`b98d823`): the auth
+    recomputes the owning organization from the dataset at call time and never
+    stored it, so the observable consequence — an approver whose admin capacity
+    no longer covers the current owner is refused — was already satisfied by
+    construction. It is written to **keep** that property: a later cut that
+    caches the org on the row or in the decision context would let the old
+    org's admin decide a request that no longer lives in their org, and this
+    test would fall.
+
+    The requester is made an editor of the new owner on purpose: the point
+    under test is the **approver's** capacity. Leaving the requester without
+    capacity on the new owner would trip the requester half instead and refuse
+    every approver, which would prove the wrong thing.
+    """
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    new_org = factories.Organization()
+    new_admin = factories.User()
+    add_user_member(new_org["id"], new_admin["id"], "admin")
+    add_user_member(new_org["id"], scene["editor"]["id"], "editor")
+
+    helpers.call_action(
+        "package_patch",
+        {"ignore_auth": True, "user": "default"},
+        id=scene["dataset"]["id"],
+        owner_org=new_org["id"],
+    )
+
+    with pytest.raises(toolkit.NotAuthorized):
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    decided = call_as(
+        new_admin,
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+    assert stored(scene["dataset"]["id"])["private"] is False
+
+
+def test_decide_refuses_when_the_requester_lost_their_capacity(scene, store):
+    """A2.6, requester half: the decision re-checks the requester's **current**
+    capacity. The request was valid when created; the requester is then removed
+    from the owning organization, so the decision is refused as an
+    authorization failure and the row stays `pending`.
+
+    It is **not** `annulled`: the object did not disappear, and the two
+    annulment triggers are exactly the deleted dataset and the other publish
+    path. It is not `cancelled` either: the requester did not withdraw.
+
+    Discriminating: without the requester-capacity check the org admin's decide
+    succeeds — the requester is not the caller, so four eyes does not fire. The
+    RED was observed before the check existed.
+    """
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    revoke_membership(scene["org"]["id"], scene["editor"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.DECIDE_REQUESTER_CAPACITY_MSG in str(excinfo.value)
+    assert "four eyes" not in str(excinfo.value).lower()
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+def test_a_sysadmin_approver_is_also_refused_when_the_requester_lost_capacity(
+    scene, store
+):
+    """The requester-capacity rule has no sysadmin exception, for the same
+    reason four eyes has none: a sysadmin's sanctioned alternative is
+    `publication_publish`, which annuls the pending row and publishes in the
+    act. Without this, the rule would be written, green and hollow for a
+    sysadmin approver — the function carries `auth_sysadmins_check`, so the
+    check must sit before the sysadmin short-circuit.
+
+    Discriminating: the sysadmin short-circuit would otherwise return success
+    before the rule ran.
+    """
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    revoke_membership(scene["org"]["id"], scene["editor"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            factories.Sysadmin(),
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.DECIDE_REQUESTER_CAPACITY_MSG in str(excinfo.value)
+    assert "four eyes" not in str(excinfo.value).lower()
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+def test_decide_fails_closed_when_the_requester_cannot_be_resolved(scene, store):
+    """Triangulation of the requester half: an unresolvable requester (a
+    deleted user) fails closed. `requested_by` holds a user id; the escape
+    hatch is the sysadmin's `publication_publish`, not an open decision."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+    the_row(scene["dataset"]["id"]).requested_by = "deleted-user-id"
+    ckan_model.Session.commit()
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.DECIDE_REQUESTER_CAPACITY_MSG in str(excinfo.value)
+    assert "four eyes" not in str(excinfo.value).lower()
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_deleting_the_dataset_annuls_the_pending_request_with_the_deleted_motive(
+    scene, store
+):
+    """A2.7, deleted-object trigger: the dataset is removed under a `pending`
+    request, and the row becomes `annulled` with the motive the store records
+    for a deleted object.
+
+    The whole path is exercised — `package_delete` invokes the plugin hook
+    before `entity.delete()` and commits once — not the hook in isolation. The
+    annulled row is not `cancelled`: the requester did not withdraw.
+    """
+    request_for(scene["editor"], scene["dataset"]["id"])
+
+    helpers.call_action("package_delete", id=scene["dataset"]["id"])
+
+    for_dataset = [r for r in rows() if r.dataset_id == scene["dataset"]["id"]]
+    assert len(for_dataset) == 1
+    assert for_dataset[0].status == umss_model.ANNULLED
+    assert for_dataset[0].status != umss_model.CANCELLED
+    assert for_dataset[0].motive == umss_model.MOTIVE_DATASET_DELETED
+    assert for_dataset[0].decided_at is not None
+
+
+def test_deleting_the_dataset_by_name_annuls_the_pending_request(scene, store):
+    """The hook's docstring claims a dataset **name** is legal input to
+    `package_delete` and is resolved to the canonical id before the row is
+    matched. Source reading confirmed the mechanism but no executed test did;
+    this closes that gap.
+
+    A **pin for an untested path, not a RED**: it passes against the WU2 hook
+    as first written, because that hook already resolved the name through
+    `model.Package.get`. No source code changed for this test.
+    """
+    dataset_name = scene["dataset"]["name"]
+    request_for(scene["editor"], scene["dataset"]["id"])
+
+    helpers.call_action("package_delete", id=dataset_name)
+
+    for_dataset = [r for r in rows() if r.dataset_id == scene["dataset"]["id"]]
+    assert len(for_dataset) == 1
+    assert for_dataset[0].status == umss_model.ANNULLED
+    assert for_dataset[0].motive == umss_model.MOTIVE_DATASET_DELETED
+
+
+def test_deleting_a_dataset_with_no_pending_request_is_a_clean_no_op(scene, store):
+    """The ordinary delete path with the plugin loaded and no pending row: the
+    hook returns without touching anything, and the deletion still commits."""
+    dataset_id = scene["second_dataset"]["id"]
+
+    helpers.call_action("package_delete", id=dataset_id)
+
+    assert [r for r in rows() if r.dataset_id == dataset_id] == []
+    assert ckan_model.Session.get(ckan_model.Package, dataset_id).state == "deleted"
+
+
+def test_deleting_a_dataset_without_the_store_table_is_a_clean_no_op(scene):
+    """The plugin is loaded but this extension's table is absent — the state
+    `clean_db` leaves before `migrate_db_for` rebuilds it, and the state the
+    wall's tests (`tests/test_auth.py`) run in. There can be no pending row, and
+    the ordinary delete must not abort its transaction on the missing table.
+
+    This pins the hook's existence guard directly; before it, the delete raised
+    `ProgrammingError: relation "publication_requests" does not exist`.
+    """
+    dataset_id = scene["second_dataset"]["id"]
+
+    helpers.call_action("package_delete", id=dataset_id)
+
+    assert ckan_model.Session.get(ckan_model.Package, dataset_id).state == "deleted"
+
+
+# ---------------------------------------------------------------------------
+# Rule 3 — the rows carry presentation names
+#
+# `requested_by` and `approved_by` stay user **ids** (rule 2); the two
+# `..._name` keys are additive. They resolve in **one batched query per call**
+# so the queue does not resolve N users per page, and the fallback is neutral:
+# an empty id column answers `None`, a set-but-unresolvable id answers
+# `"unknown"`, never the raw id.
+# ---------------------------------------------------------------------------
+
+
+NAME_KEYS = ("requested_by_name", "approved_by_name")
+
+
+def assert_names_present(row):
+    for key in NAME_KEYS:
+        assert key in row, (key, sorted(row))
+
+
+def fresh_dataset(scene):
+    return factories.Dataset(owner_org=scene["org"]["id"], private=True)
+
+
+def name_resolution_selects(statements):
+    """The `SELECT ... FROM "user" WHERE "user".id IN (...)` statements, the
+    only shape the batched resolver emits. Rule 3's own path is isolated from
+    the `_may_see` capacity lookups, which use `WHERE "user".name = ...` or
+    `"user".id = ...` and therefore never match this shape.
+    """
+    return [
+        statement
+        for statement in statements
+        if 'from "user"' in statement.lower() and '"user".id in' in statement.lower()
+    ]
+
+
+def measured(call):
+    """Run `call` while recording every statement that reaches the cursor."""
+    statements = []
+    bind = ckan_model.Session.get_bind()
+    engine = getattr(bind, "engine", bind)
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    sa.event.listen(engine, "before_cursor_execute", record)
+    try:
+        result = call()
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", record)
+    return result, statements
+
+
+def test_every_action_returns_rows_carrying_both_presentation_names(scene, store):
+    """The five faces answer the same shape: the row, with both name keys. A
+    consumer must never branch on which action produced the row."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+
+    created = call_as(
+        editor, "publication_request_create", dataset_id=scene["dataset"]["id"]
+    )
+    assert_names_present(created)
+
+    cancelled = call_as(editor, "publication_request_cancel", request_id=created["id"])
+    assert_names_present(cancelled)
+
+    rejected_source = request_for(editor, fresh_dataset(scene)["id"])
+    rejected = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=rejected_source["id"],
+        approve=False,
+        comments="no",
+    )
+    assert_names_present(rejected)
+
+    approved = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=request_for(editor, scene["second_dataset"]["id"])["id"],
+        approve=True,
+    )
+    assert_names_present(approved)
+
+    published = call_as(
+        factories.Sysadmin(),
+        "publication_publish",
+        dataset_id=fresh_dataset(scene)["id"],
+    )
+    assert_names_present(published)
+
+    listed = call_as(admin, "publication_request_list")
+    assert listed
+    for row in listed:
+        assert_names_present(row)
+
+
+def test_the_row_dict_is_additive_over_the_eleven_table_columns(scene, store):
+    """The change adds exactly two keys: the eleven table columns stay, and no
+    other key appears."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    columns = {column.name for column in umss_model.PublicationRequest.__table__.columns}
+    assert len(columns) == 11
+    assert set(created) == columns | set(NAME_KEYS)
+
+
+def test_the_names_resolve_the_ids_to_usernames(scene, store):
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+    decided = call_as(
+        scene["admin"],
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert created["requested_by_name"] == scene["editor"]["name"]
+    assert created["requested_by_name"] != scene["editor"]["id"]
+    assert decided["requested_by_name"] == scene["editor"]["name"]
+    assert decided["approved_by_name"] == scene["admin"]["name"]
+
+
+def test_approved_by_name_is_none_when_there_was_no_decision(scene, store):
+    """Rule 3's two distinct empties. On `cancelled` the requester withdrew; on
+    `annulled` there was no decision. In both the `approved_by` column is empty,
+    so the name key is `None` — not `"unknown"`, which would claim a missing
+    user rather than no user."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+
+    cancelled = request_for(editor, scene["dataset"]["id"])
+    cancelled_row = call_as(
+        editor, "publication_request_cancel", request_id=cancelled["id"]
+    )
+    assert cancelled_row["approved_by"] is None
+    assert cancelled_row["approved_by_name"] is None
+    assert cancelled_row["requested_by_name"] == editor["name"]
+
+    annulled = request_for(editor, scene["second_dataset"]["id"])
+    call_as(
+        factories.Sysadmin(),
+        "publication_publish",
+        dataset_id=scene["second_dataset"]["id"],
+    )
+
+    listed = call_as(admin, "publication_request_list")
+    annulled_rows = [row for row in listed if row["id"] == annulled["id"]]
+    assert len(annulled_rows) == 1
+    assert annulled_rows[0]["status"] == umss_model.ANNULLED
+    assert annulled_rows[0]["approved_by"] is None
+    assert annulled_rows[0]["approved_by_name"] is None
+    assert annulled_rows[0]["requested_by_name"] == editor["name"]
+
+
+def test_approved_by_name_names_the_decider_on_approved_and_rejected(scene, store):
+    """`approved_by_name` is meaningful exactly on the two decided outcomes."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+
+    rejected_source = request_for(editor, scene["dataset"]["id"])
+    rejected = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=rejected_source["id"],
+        approve=False,
+        comments="no",
+    )
+    assert rejected["approved_by"] == admin["id"]
+    assert rejected["approved_by_name"] == admin["name"]
+
+    approved_source = request_for(editor, scene["second_dataset"]["id"])
+    approved = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=approved_source["id"],
+        approve=True,
+    )
+    assert approved["approved_by"] == admin["id"]
+    assert approved["approved_by_name"] == admin["name"]
+
+
+def test_a_set_but_unresolvable_id_answers_unknown_and_never_the_id(scene, store):
+    """Rule 3's neutral fallback: a field called `..._name` must never contain
+    an id. The row keeps the raw id in its id column; the name key says
+    `"unknown"`."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+    ghost = "00000000-0000-0000-0000-000000000000"
+
+    created = request_for(editor, scene["dataset"]["id"])
+    call_as(admin, "publication_request_decide", request_id=created["id"], approve=True)
+
+    row = the_row(scene["dataset"]["id"])
+    row.approved_by = ghost
+    ckan_model.Session.commit()
+
+    listed = call_as(admin, "publication_request_list", status="approved")
+    target = [candidate for candidate in listed if candidate["id"] == created["id"]]
+    assert len(target) == 1
+    assert target[0]["approved_by"] == ghost
+    assert target[0]["approved_by_name"] == "unknown"
+    assert target[0]["approved_by_name"] != ghost
+    assert ghost not in target[0]["approved_by_name"]
+
+    # The requester side has the same fallback.
+    row.requested_by = ghost
+    ckan_model.Session.commit()
+
+    listed = call_as(admin, "publication_request_list", status="approved")
+    target = [candidate for candidate in listed if candidate["id"] == created["id"]]
+    assert len(target) == 1
+    assert target[0]["requested_by"] == ghost
+    assert target[0]["requested_by_name"] == "unknown"
+    assert target[0]["requested_by_name"] != ghost
+
+
+def test_list_resolves_every_name_in_one_query_for_the_whole_page(scene, store):
+    """Rule 3 is a **cost** contract, so the test measures the cost, not only
+    the names: three pending rows under one list call must hit the user table
+    once. A per-row resolver would measure three."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+    datasets = [
+        scene["dataset"],
+        scene["second_dataset"],
+        fresh_dataset(scene),
+    ]
+    for dataset in datasets:
+        request_for(editor, dataset["id"])
+
+    listed, statements = measured(
+        lambda: call_as(admin, "publication_request_list")
+    )
+
+    assert len(listed) >= 3
+    assert all(row["requested_by_name"] == editor["name"] for row in listed)
+
+    user_selects = name_resolution_selects(statements)
+    assert len(user_selects) == 1, user_selects
+
+
+def test_a_single_row_return_resolves_both_ids_in_one_query(scene, store):
+    """The single-row faces share the batching: both id columns live in the
+    same `IN`, so a decision costs one user query, not two."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+    created = request_for(editor, scene["dataset"]["id"])
+
+    decided, statements = measured(
+        lambda: call_as(
+            admin,
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+    )
+
+    assert decided["requested_by_name"] == editor["name"]
+    assert decided["approved_by_name"] == admin["name"]
+
+    user_selects = name_resolution_selects(statements)
+    assert len(user_selects) == 1, user_selects
+
