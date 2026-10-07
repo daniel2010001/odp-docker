@@ -483,3 +483,31 @@ def test_a_failed_flip_on_publish_leaves_the_pending_request_untouched(
     row = the_row(scene["dataset"]["id"])
     assert row.status == "pending"
     assert stored(scene["dataset"]["id"])["private"] is True
+
+
+# ---------------------------------------------------------------------------
+# The correction round: what the four-lens review at tier high opened
+#
+# Only the two CRITICALs are obligatory (`fix_finding_ids`), and they are one
+# defect seen twice: neither writing action resolved its `dataset_id`, and the
+# auth functions answer `success` for an unresolvable id on purpose.
+# ---------------------------------------------------------------------------
+
+
+def test_create_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
+    """R1-ORPHAN-ROW and R3-001: without this check, any authenticated editor
+    could write `pending` rows for datasets that do not exist."""
+    with pytest.raises(toolkit.ObjectNotFound):
+        call_as(
+            scene["editor"], "publication_request_create", dataset_id="no-such-dataset"
+        )
+
+    assert rows() == []
+
+
+def test_publish_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
+    """The same hole lived in the other writing action."""
+    with pytest.raises(toolkit.ObjectNotFound):
+        call_as(scene["admin"], "publication_publish", dataset_id="no-such-dataset")
+
+    assert rows() == []

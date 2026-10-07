@@ -49,6 +49,20 @@ def _required(data_dict, name):
     return value
 
 
+def _existing_dataset(dataset_id):
+    """The dataset, or `NotFound`.
+
+    This is what stands between a bogus `dataset_id` and an orphan row: the auth
+    functions answer `success` for an unresolvable id on purpose (a `403` would
+    misreport a missing thing as a missing capacity), so the check is the
+    action's (R1-ORPHAN-ROW, R3-001).
+    """
+    dataset = model.Package.get(dataset_id)
+    if dataset is None:
+        raise toolkit.ObjectNotFound("Dataset not found: %s" % dataset_id)
+    return dataset
+
+
 def _caller_id(context):
     user = context.get("auth_user_obj") or model.User.get(context.get("user"))
     return user.id if user else None
@@ -115,6 +129,7 @@ def publication_request_create(context, data_dict):
     """D4: writes one `pending` row, and is idempotent on the pending one."""
     toolkit.check_access("publication_request_create", context, data_dict)
     dataset_id = _required(data_dict, "dataset_id")
+    _existing_dataset(dataset_id)
 
     existing = _pending_for(dataset_id)
     if existing is not None:
@@ -180,6 +195,8 @@ def publication_publish(context, data_dict):
     """
     toolkit.check_access("publication_publish", context, data_dict)
     dataset_id = _required(data_dict, "dataset_id")
+    _existing_dataset(dataset_id)
+
     caller = _caller_id(context)
     now = _now()
 
