@@ -13,10 +13,16 @@ once so both sides read it from the same place.
 | The five actions **as delivered** (`1a2d6c2`) | implement **D4 before the governance amendment**: `publication_publish` authorizes an org `admin`, and `publication_decide` has **no** four-eyes check |
 | **This file describes** | the contract of `unit/a2-governance`, which is **in flight** |
 | The governance amendment | `odp` commit `41de6c2`, `design.md:194,207` and `spec.md:284,586` |
+| The unit's state and what it must carry | `HANDOFF-2026-10-07.md` (tracked, repository root) |
 
 So: **do not wire a consumer against the table below until that unit lands.** Both sides have already
 paid for adopting a contract ahead of the code — once as a `403` read as a failure, once as a missing
 key read as a failure.
+
+**The gap is live, not theoretical:** in the dev stack today, a token with the `admin` capacity of the
+owning organization approves its own request and publishes directly, because the delivered code predates
+the amendment. Nothing in the portal prevents it: the guarantee lives in CKAN's authorization layer, so
+until `unit/a2-governance` lands the rule is enforced nowhere but in the portal's UI.
 
 ## The five actions
 
