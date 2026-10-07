@@ -24,6 +24,7 @@ The contract these tests pin, for the portal that consumes it:
 rest of CKAN follows (`package_show` answers `creator_user_id`, not a name).
 """
 import pytest
+import sqlalchemy as sa
 
 import ckan.model as ckan_model
 import ckan.plugins.toolkit as toolkit
@@ -941,3 +942,269 @@ def test_deleting_a_dataset_without_the_store_table_is_a_clean_no_op(scene):
     helpers.call_action("package_delete", id=dataset_id)
 
     assert ckan_model.Session.get(ckan_model.Package, dataset_id).state == "deleted"
+
+
+# ---------------------------------------------------------------------------
+# Rule 3 — the rows carry presentation names
+#
+# `requested_by` and `approved_by` stay user **ids** (rule 2); the two
+# `..._name` keys are additive. They resolve in **one batched query per call**
+# so the queue does not resolve N users per page, and the fallback is neutral:
+# an empty id column answers `None`, a set-but-unresolvable id answers
+# `"unknown"`, never the raw id.
+# ---------------------------------------------------------------------------
+
+
+NAME_KEYS = ("requested_by_name", "approved_by_name")
+
+
+def assert_names_present(row):
+    for key in NAME_KEYS:
+        assert key in row, (key, sorted(row))
+
+
+def fresh_dataset(scene):
+    return factories.Dataset(owner_org=scene["org"]["id"], private=True)
+
+
+def name_resolution_selects(statements):
+    """The `SELECT ... FROM "user" WHERE "user".id IN (...)` statements, the
+    only shape the batched resolver emits. Rule 3's own path is isolated from
+    the `_may_see` capacity lookups, which use `WHERE "user".name = ...` or
+    `"user".id = ...` and therefore never match this shape.
+    """
+    return [
+        statement
+        for statement in statements
+        if 'from "user"' in statement.lower() and '"user".id in' in statement.lower()
+    ]
+
+
+def measured(call):
+    """Run `call` while recording every statement that reaches the cursor."""
+    statements = []
+    bind = ckan_model.Session.get_bind()
+    engine = getattr(bind, "engine", bind)
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    sa.event.listen(engine, "before_cursor_execute", record)
+    try:
+        result = call()
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", record)
+    return result, statements
+
+
+def test_every_action_returns_rows_carrying_both_presentation_names(scene, store):
+    """The five faces answer the same shape: the row, with both name keys. A
+    consumer must never branch on which action produced the row."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+
+    created = call_as(
+        editor, "publication_request_create", dataset_id=scene["dataset"]["id"]
+    )
+    assert_names_present(created)
+
+    cancelled = call_as(editor, "publication_request_cancel", request_id=created["id"])
+    assert_names_present(cancelled)
+
+    rejected_source = request_for(editor, fresh_dataset(scene)["id"])
+    rejected = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=rejected_source["id"],
+        approve=False,
+        comments="no",
+    )
+    assert_names_present(rejected)
+
+    approved = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=request_for(editor, scene["second_dataset"]["id"])["id"],
+        approve=True,
+    )
+    assert_names_present(approved)
+
+    published = call_as(
+        factories.Sysadmin(),
+        "publication_publish",
+        dataset_id=fresh_dataset(scene)["id"],
+    )
+    assert_names_present(published)
+
+    listed = call_as(admin, "publication_request_list")
+    assert listed
+    for row in listed:
+        assert_names_present(row)
+
+
+def test_the_row_dict_is_additive_over_the_eleven_table_columns(scene, store):
+    """The change adds exactly two keys: the eleven table columns stay, and no
+    other key appears."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    columns = {column.name for column in umss_model.PublicationRequest.__table__.columns}
+    assert len(columns) == 11
+    assert set(created) == columns | set(NAME_KEYS)
+
+
+def test_the_names_resolve_the_ids_to_usernames(scene, store):
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+    decided = call_as(
+        scene["admin"],
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert created["requested_by_name"] == scene["editor"]["name"]
+    assert created["requested_by_name"] != scene["editor"]["id"]
+    assert decided["requested_by_name"] == scene["editor"]["name"]
+    assert decided["approved_by_name"] == scene["admin"]["name"]
+
+
+def test_approved_by_name_is_none_when_there_was_no_decision(scene, store):
+    """Rule 3's two distinct empties. On `cancelled` the requester withdrew; on
+    `annulled` there was no decision. In both the `approved_by` column is empty,
+    so the name key is `None` — not `"unknown"`, which would claim a missing
+    user rather than no user."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+
+    cancelled = request_for(editor, scene["dataset"]["id"])
+    cancelled_row = call_as(
+        editor, "publication_request_cancel", request_id=cancelled["id"]
+    )
+    assert cancelled_row["approved_by"] is None
+    assert cancelled_row["approved_by_name"] is None
+    assert cancelled_row["requested_by_name"] == editor["name"]
+
+    annulled = request_for(editor, scene["second_dataset"]["id"])
+    call_as(
+        factories.Sysadmin(),
+        "publication_publish",
+        dataset_id=scene["second_dataset"]["id"],
+    )
+
+    listed = call_as(admin, "publication_request_list")
+    annulled_rows = [row for row in listed if row["id"] == annulled["id"]]
+    assert len(annulled_rows) == 1
+    assert annulled_rows[0]["status"] == umss_model.ANNULLED
+    assert annulled_rows[0]["approved_by"] is None
+    assert annulled_rows[0]["approved_by_name"] is None
+    assert annulled_rows[0]["requested_by_name"] == editor["name"]
+
+
+def test_approved_by_name_names_the_decider_on_approved_and_rejected(scene, store):
+    """`approved_by_name` is meaningful exactly on the two decided outcomes."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+
+    rejected_source = request_for(editor, scene["dataset"]["id"])
+    rejected = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=rejected_source["id"],
+        approve=False,
+        comments="no",
+    )
+    assert rejected["approved_by"] == admin["id"]
+    assert rejected["approved_by_name"] == admin["name"]
+
+    approved_source = request_for(editor, scene["second_dataset"]["id"])
+    approved = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=approved_source["id"],
+        approve=True,
+    )
+    assert approved["approved_by"] == admin["id"]
+    assert approved["approved_by_name"] == admin["name"]
+
+
+def test_a_set_but_unresolvable_id_answers_unknown_and_never_the_id(scene, store):
+    """Rule 3's neutral fallback: a field called `..._name` must never contain
+    an id. The row keeps the raw id in its id column; the name key says
+    `"unknown"`."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+    ghost = "00000000-0000-0000-0000-000000000000"
+
+    created = request_for(editor, scene["dataset"]["id"])
+    call_as(admin, "publication_request_decide", request_id=created["id"], approve=True)
+
+    row = the_row(scene["dataset"]["id"])
+    row.approved_by = ghost
+    ckan_model.Session.commit()
+
+    listed = call_as(admin, "publication_request_list", status="approved")
+    target = [candidate for candidate in listed if candidate["id"] == created["id"]]
+    assert len(target) == 1
+    assert target[0]["approved_by"] == ghost
+    assert target[0]["approved_by_name"] == "unknown"
+    assert target[0]["approved_by_name"] != ghost
+    assert ghost not in target[0]["approved_by_name"]
+
+    # The requester side has the same fallback.
+    row.requested_by = ghost
+    ckan_model.Session.commit()
+
+    listed = call_as(admin, "publication_request_list", status="approved")
+    target = [candidate for candidate in listed if candidate["id"] == created["id"]]
+    assert len(target) == 1
+    assert target[0]["requested_by"] == ghost
+    assert target[0]["requested_by_name"] == "unknown"
+    assert target[0]["requested_by_name"] != ghost
+
+
+def test_list_resolves_every_name_in_one_query_for_the_whole_page(scene, store):
+    """Rule 3 is a **cost** contract, so the test measures the cost, not only
+    the names: three pending rows under one list call must hit the user table
+    once. A per-row resolver would measure three."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+    datasets = [
+        scene["dataset"],
+        scene["second_dataset"],
+        fresh_dataset(scene),
+    ]
+    for dataset in datasets:
+        request_for(editor, dataset["id"])
+
+    listed, statements = measured(
+        lambda: call_as(admin, "publication_request_list")
+    )
+
+    assert len(listed) >= 3
+    assert all(row["requested_by_name"] == editor["name"] for row in listed)
+
+    user_selects = name_resolution_selects(statements)
+    assert len(user_selects) == 1, user_selects
+
+
+def test_a_single_row_return_resolves_both_ids_in_one_query(scene, store):
+    """The single-row faces share the batching: both id columns live in the
+    same `IN`, so a decision costs one user query, not two."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+    created = request_for(editor, scene["dataset"]["id"])
+
+    decided, statements = measured(
+        lambda: call_as(
+            admin,
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+    )
+
+    assert decided["requested_by_name"] == editor["name"]
+    assert decided["approved_by_name"] == admin["name"]
+
+    user_selects = name_resolution_selects(statements)
+    assert len(user_selects) == 1, user_selects
+
