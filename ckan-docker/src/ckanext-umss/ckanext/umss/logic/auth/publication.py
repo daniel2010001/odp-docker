@@ -11,10 +11,10 @@ These are plain auth functions for the extension's own action names. The two
 *chained* functions that guard core's actions live in `ckanext.umss.auth`, and
 are a different mechanism on purpose.
 
-A missing `request_id` or an unresolvable one answers `success: True` and lets
-the action raise `NotFound`: a `403` would claim the caller lacks a capacity,
-when what happened is that the thing does not exist. `ckanext/umss/auth.py`
-follows the same rule for unresolvable package ids.
+A missing `request_id`, an unresolvable one, or an unresolvable `dataset_id`
+answers `success: True` and lets the action raise `NotFound`: a `403` would claim
+the caller lacks a capacity, when what happened is that the thing does not
+exist. `ckanext/umss/auth.py` follows the same rule for unresolvable package ids.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ import ckan.model as model
 import ckan.plugins.toolkit as toolkit
 
 from ckanext.umss import model as umss_model
+from ckanext.umss.logic import caller_id
 
 
 __all__ = [
@@ -66,19 +67,9 @@ PUBLISH_DENIED_MSG = (
 ALREADY_PUBLIC_MSG = "That dataset is already public"
 
 
-def _user_id(context):
-    user = context.get("auth_user_obj") or model.User.get(context.get("user"))
-    return user.id if user else None
-
-
 def _org_id_of_dataset(dataset_id):
     dataset = model.Package.get(dataset_id) if dataset_id else None
     return dataset.owner_org if dataset else None
-
-
-def _org_id_of_request(request_id):
-    row = _request_row(request_id)
-    return _org_id_of_dataset(row.dataset_id) if row else None
 
 
 def _request_row(request_id):
@@ -143,7 +134,7 @@ def publication_request_cancel(context, data_dict):
     row = _request_row(data_dict.get("request_id"))
     if row is None:
         return {"success": True}
-    if row.requested_by and row.requested_by == _user_id(context):
+    if row.requested_by and row.requested_by == caller_id(context):
         return {"success": True}
     if _allowed(context, _org_id_of_dataset(row.dataset_id), ADMIN_PERMISSION):
         return {"success": True}
@@ -178,7 +169,7 @@ def publication_request_decide(context, data_dict):
     if row is None:
         return {"success": True}
 
-    caller = _user_id(context)
+    caller = caller_id(context)
     is_requester = bool(row.requested_by) and row.requested_by == caller
 
     # A2.6, requester half: the decision re-checks the requester's **current**
@@ -200,6 +191,7 @@ def publication_request_decide(context, data_dict):
     return {"success": True}
 
 
+@toolkit.auth_sysadmins_check
 def publication_publish(context, data_dict):
     """The governance amendment: a sysadmin publishing on their own authority.
 
@@ -212,10 +204,26 @@ def publication_publish(context, data_dict):
     `success` for an unknown id and the action raises `NotFound`
     (R1-ORPHAN-ROW). Only the capacity predicate below narrows the caller to a
     sysadmin.
+
+    An already public dataset is refused here, the way
+    `publication_request_create` refuses one: the flip would be a no-op and the
+    caller would only be piling up identical `approved` rows (A2's review,
+    R3-003).
+
+    `auth_sysadmins_check` is load-bearing for that second guard, exactly as it
+    is for `publication_request_decide`. Without it CKAN short-circuits every
+    sysadmin to success *before* this function runs (`ckan/authz.py:224-228`);
+    since the amendment makes this action sysadmin-only, the already-public
+    refusal would then be unreachable for every caller who can reach the action
+    at all. With it, the function runs for a sysadmin too and must answer for
+    that caller explicitly — which it does by returning `success` once the
+    dataset is private.
     """
     dataset = model.Package.get(data_dict.get("dataset_id") or "")
     if dataset is None:
         return {"success": True}
+    if not dataset.private:
+        return {"success": False, "msg": ALREADY_PUBLIC_MSG}
     if not ckan_authz.is_sysadmin(context.get("user")):
         return {"success": False, "msg": PUBLISH_DENIED_MSG}
     return {"success": True}

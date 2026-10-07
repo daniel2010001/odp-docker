@@ -7,8 +7,11 @@ drive the actions through `logic.get_action`, which is the path the API
 controller takes, so they prove the actions are **registered**, not merely
 defined.
 
-Phase A2.1 is RED: the module does not exist yet, so this file fails at import.
-There is no `skip`/`xfail` to soften that.
+Phases A2.1–A2.5 landed together in this file's own commit: CKAN raises
+`ValueError('Authorization function not found: ...')` for an action with no auth
+function (`ckan/authz.py:235-254`), so the actions and their authorization could
+not be separated in time, and the authorization tests below were written as RED
+together with the surface ones.
 
 The contract these tests pin, for the portal that consumes it:
 
@@ -599,6 +602,95 @@ def test_list_returns_only_what_the_caller_may_see(scene, store):
 
 
 # ---------------------------------------------------------------------------
+# The correction round: what the four-lens review at tier high opened
+#
+# Only the two CRITICALs are obligatory (`fix_finding_ids`), and they are one
+# defect seen twice: neither writing action resolved its `dataset_id`, and the
+# auth functions answer `success` for an unresolvable id on purpose.
+# ---------------------------------------------------------------------------
+
+
+def test_create_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
+    """The auth answers `success` for an unresolvable id so the action can
+    answer `NotFound` — which means the action has to actually check it, or a
+    bogus `dataset_id` becomes an orphan row (R1-ORPHAN-ROW, R3-001)."""
+    with pytest.raises(toolkit.ObjectNotFound):
+        call_as(
+            scene["editor"], "publication_request_create", dataset_id="no-such-dataset"
+        )
+
+    assert rows() == []
+
+
+def test_publish_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
+    """The same hole lived in the other writing action."""
+    with pytest.raises(toolkit.ObjectNotFound):
+        call_as(
+            factories.Sysadmin(),
+            "publication_publish",
+            dataset_id="no-such-dataset",
+        )
+
+    assert rows() == []
+
+
+def test_a_non_sysadmin_gets_not_found_for_an_unknown_dataset(scene, store):
+    """Contract rule 7: an unresolvable `dataset_id` answers `NotFound`, not
+    `403` — for a non-sysadmin too. The auth function resolves the id first and
+    defers existence to the action; the capacity predicate narrows *who* may
+    publish, it does not pre-empt *whether the thing exists*."""
+    with pytest.raises(toolkit.ObjectNotFound):
+        call_as(
+            scene["admin"],
+            "publication_publish",
+            dataset_id="no-such-dataset",
+        )
+
+    assert rows() == []
+
+
+def test_publish_refuses_a_dataset_that_is_already_public(scene, store):
+    """A second direct publish of an already public dataset is refused by the
+    auth, the way `publication_request_create` refuses one: the flip would be a
+    no-op and the caller would only be piling up identical `approved` rows
+    (A2's review, R3-003)."""
+    sysadmin = factories.Sysadmin()
+    call_as(sysadmin, "publication_publish", dataset_id=scene["second_dataset"]["id"])
+    before = len(rows())
+
+    refused(sysadmin, "publication_publish", dataset_id=scene["second_dataset"]["id"])
+
+    assert len(rows()) == before
+
+
+def test_create_loses_the_race_by_returning_the_winners_row(scene, store, monkeypatch):
+    """Idempotency has to hold when two creates interleave, not only in sequence.
+
+    The seam is `_pending_for`, patched to miss on its first call so the action
+    takes the insert path with a `pending` row already in the table — the race,
+    deterministically. What settles it is D2's partial unique index, and the
+    loser's answer must be the winner's row (R4-create-race, R3-002).
+    """
+    winner = request_for(scene["editor"], scene["dataset"]["id"])
+
+    real_pending_for = actions._pending_for
+    seen = []
+
+    def blind_first(dataset_id):
+        seen.append(dataset_id)
+        return None if len(seen) == 1 else real_pending_for(dataset_id)
+
+    monkeypatch.setattr(actions, "_pending_for", blind_first)
+
+    same = call_as(
+        scene["editor"], "publication_request_create", dataset_id=scene["dataset"]["id"]
+    )
+
+    assert same["id"] == winner["id"]
+    assert len(rows()) == 1
+
+
+# ---------------------------------------------------------------------------
 # A2.5 — the record and the flip are one transaction (D5's "asserted, not measured")
 # ---------------------------------------------------------------------------
 
@@ -658,53 +750,6 @@ def test_a_failed_flip_on_publish_leaves_the_pending_request_untouched(
     row = the_row(scene["dataset"]["id"])
     assert row.status == "pending"
     assert stored(scene["dataset"]["id"])["private"] is True
-
-
-# ---------------------------------------------------------------------------
-# The correction round: what the four-lens review at tier high opened
-#
-# Only the two CRITICALs are obligatory (`fix_finding_ids`), and they are one
-# defect seen twice: neither writing action resolved its `dataset_id`, and the
-# auth functions answer `success` for an unresolvable id on purpose.
-# ---------------------------------------------------------------------------
-
-
-def test_create_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
-    """R1-ORPHAN-ROW and R3-001: without this check, any authenticated editor
-    could write `pending` rows for datasets that do not exist."""
-    with pytest.raises(toolkit.ObjectNotFound):
-        call_as(
-            scene["editor"], "publication_request_create", dataset_id="no-such-dataset"
-        )
-
-    assert rows() == []
-
-
-def test_publish_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
-    """The same hole lived in the other writing action."""
-    with pytest.raises(toolkit.ObjectNotFound):
-        call_as(
-            factories.Sysadmin(),
-            "publication_publish",
-            dataset_id="no-such-dataset",
-        )
-
-    assert rows() == []
-
-
-def test_a_non_sysadmin_gets_not_found_for_an_unknown_dataset(scene, store):
-    """Contract rule 7: an unresolvable `dataset_id` answers `NotFound`, not
-    `403` — for a non-sysadmin too. The auth function resolves the id first and
-    defers existence to the action; the capacity predicate narrows *who* may
-    publish, it does not pre-empt *whether the thing exists*."""
-    with pytest.raises(toolkit.ObjectNotFound):
-        call_as(
-            scene["admin"],
-            "publication_publish",
-            dataset_id="no-such-dataset",
-        )
-
-    assert rows() == []
 
 
 # ---------------------------------------------------------------------------
@@ -970,7 +1015,7 @@ def fresh_dataset(scene):
 def name_resolution_selects(statements):
     """The `SELECT ... FROM "user" WHERE "user".id IN (...)` statements, the
     only shape the batched resolver emits. Rule 3's own path is isolated from
-    the `_may_see` capacity lookups, which use `WHERE "user".name = ...` or
+    the `may_see` capacity lookups, which use `WHERE "user".name = ...` or
     `"user".id = ...` and therefore never match this shape.
     """
     return [
@@ -1207,4 +1252,3 @@ def test_a_single_row_return_resolves_both_ids_in_one_query(scene, store):
 
     user_selects = name_resolution_selects(statements)
     assert len(user_selects) == 1, user_selects
-
