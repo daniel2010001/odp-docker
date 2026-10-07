@@ -31,6 +31,7 @@ from ckan.tests import factories, helpers
 
 from ckanext.umss import model as umss_model
 from ckanext.umss.logic.action import publication as actions
+from ckanext.umss.logic.auth import publication as auth_publication
 
 
 pytestmark = [
@@ -318,7 +319,11 @@ def test_publish_writes_and_consumes_the_row_in_the_act(scene, store):
 
 def test_publish_annuls_a_pending_request_instead_of_leaving_it_open(scene, store):
     """`annulled` is what D2 added it for, and it is not `cancelled`: the
-    requester did not withdraw it — a direct sysadmin action made it moot."""
+    requester did not withdraw it — a direct sysadmin action made it moot.
+
+    The pending row records **why** (`motive`), and the direct publish writes
+    **one** new row: the pending one is annulled, never turned into a second
+    `approved`."""
     request_for(scene["editor"], scene["dataset"]["id"])
 
     call_as(
@@ -327,8 +332,19 @@ def test_publish_annuls_a_pending_request_instead_of_leaving_it_open(scene, stor
         dataset_id=scene["dataset"]["id"],
     )
 
-    statuses = sorted(r.status for r in rows() if r.dataset_id == scene["dataset"]["id"])
+    for_dataset = [r for r in rows() if r.dataset_id == scene["dataset"]["id"]]
+    statuses = sorted(r.status for r in for_dataset)
     assert statuses == ["annulled", "approved"]
+    assert len(for_dataset) == 2
+
+    annulled = [r for r in for_dataset if r.status == umss_model.ANNULLED]
+    approved = [r for r in for_dataset if r.status == umss_model.APPROVED]
+    assert len(annulled) == 1
+    assert len(approved) == 1, "the direct publish must not write a second approval"
+    assert annulled[0].status != umss_model.CANCELLED
+    assert annulled[0].motive is not None
+    assert annulled[0].motive == umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH
+    assert annulled[0].decided_at is not None
     assert stored(scene["dataset"]["id"])["private"] is False
 
 
@@ -688,3 +704,240 @@ def test_a_non_sysadmin_gets_not_found_for_an_unknown_dataset(scene, store):
         )
 
     assert rows() == []
+
+
+# ---------------------------------------------------------------------------
+# A2.6 / A2.7 — the decision re-checks the current state, and a pending request
+# whose object is gone is annulled
+#
+# A2.7 has exactly two triggers: the dataset deleted, or published by another
+# path. The requester losing capacity is **not** one of them: the decision is
+# refused as an authorization failure and the row stays `pending` (the author's
+# decision, 2026-10-07). `annulled` and `cancelled` stay distinct throughout:
+# the requester did not withdraw.
+# ---------------------------------------------------------------------------
+
+
+def revoke_membership(org_id, user_id):
+    return helpers.call_action(
+        "member_delete", id=org_id, object=user_id, object_type="user"
+    )
+
+
+def test_the_motive_tokens_are_the_interface_values():
+    """The `motive` values are a **cross-repository interface**: the portal and
+    the tracked contract match on the exact strings, while every other test
+    here compares against the Python constants. A consistent typo in a
+    constant's value would pass all of those and still break the consumer, so
+    this is the one place that pins the literals. It is a pin, not a RED: it
+    passes against the constants as first written.
+    """
+    assert umss_model.MOTIVE_DATASET_DELETED == "dataset_deleted"
+    assert (
+        umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH == "published_by_another_path"
+    )
+
+
+def test_decide_re_checks_the_owning_organization_at_decision_time(scene, store):
+    """A2.6, owner half — a **regression pin**, not a TDD proof.
+
+    This passes at the commit this cut started from (`b98d823`): the auth
+    recomputes the owning organization from the dataset at call time and never
+    stored it, so the observable consequence — an approver whose admin capacity
+    no longer covers the current owner is refused — was already satisfied by
+    construction. It is written to **keep** that property: a later cut that
+    caches the org on the row or in the decision context would let the old
+    org's admin decide a request that no longer lives in their org, and this
+    test would fall.
+
+    The requester is made an editor of the new owner on purpose: the point
+    under test is the **approver's** capacity. Leaving the requester without
+    capacity on the new owner would trip the requester half instead and refuse
+    every approver, which would prove the wrong thing.
+    """
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    new_org = factories.Organization()
+    new_admin = factories.User()
+    add_user_member(new_org["id"], new_admin["id"], "admin")
+    add_user_member(new_org["id"], scene["editor"]["id"], "editor")
+
+    helpers.call_action(
+        "package_patch",
+        {"ignore_auth": True, "user": "default"},
+        id=scene["dataset"]["id"],
+        owner_org=new_org["id"],
+    )
+
+    with pytest.raises(toolkit.NotAuthorized):
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    decided = call_as(
+        new_admin,
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+    assert stored(scene["dataset"]["id"])["private"] is False
+
+
+def test_decide_refuses_when_the_requester_lost_their_capacity(scene, store):
+    """A2.6, requester half: the decision re-checks the requester's **current**
+    capacity. The request was valid when created; the requester is then removed
+    from the owning organization, so the decision is refused as an
+    authorization failure and the row stays `pending`.
+
+    It is **not** `annulled`: the object did not disappear, and the two
+    annulment triggers are exactly the deleted dataset and the other publish
+    path. It is not `cancelled` either: the requester did not withdraw.
+
+    Discriminating: without the requester-capacity check the org admin's decide
+    succeeds — the requester is not the caller, so four eyes does not fire. The
+    RED was observed before the check existed.
+    """
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    revoke_membership(scene["org"]["id"], scene["editor"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.DECIDE_REQUESTER_CAPACITY_MSG in str(excinfo.value)
+    assert "four eyes" not in str(excinfo.value).lower()
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+def test_a_sysadmin_approver_is_also_refused_when_the_requester_lost_capacity(
+    scene, store
+):
+    """The requester-capacity rule has no sysadmin exception, for the same
+    reason four eyes has none: a sysadmin's sanctioned alternative is
+    `publication_publish`, which annuls the pending row and publishes in the
+    act. Without this, the rule would be written, green and hollow for a
+    sysadmin approver — the function carries `auth_sysadmins_check`, so the
+    check must sit before the sysadmin short-circuit.
+
+    Discriminating: the sysadmin short-circuit would otherwise return success
+    before the rule ran.
+    """
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    revoke_membership(scene["org"]["id"], scene["editor"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            factories.Sysadmin(),
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.DECIDE_REQUESTER_CAPACITY_MSG in str(excinfo.value)
+    assert "four eyes" not in str(excinfo.value).lower()
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+def test_decide_fails_closed_when_the_requester_cannot_be_resolved(scene, store):
+    """Triangulation of the requester half: an unresolvable requester (a
+    deleted user) fails closed. `requested_by` holds a user id; the escape
+    hatch is the sysadmin's `publication_publish`, not an open decision."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+    the_row(scene["dataset"]["id"]).requested_by = "deleted-user-id"
+    ckan_model.Session.commit()
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.DECIDE_REQUESTER_CAPACITY_MSG in str(excinfo.value)
+    assert "four eyes" not in str(excinfo.value).lower()
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_deleting_the_dataset_annuls_the_pending_request_with_the_deleted_motive(
+    scene, store
+):
+    """A2.7, deleted-object trigger: the dataset is removed under a `pending`
+    request, and the row becomes `annulled` with the motive the store records
+    for a deleted object.
+
+    The whole path is exercised — `package_delete` invokes the plugin hook
+    before `entity.delete()` and commits once — not the hook in isolation. The
+    annulled row is not `cancelled`: the requester did not withdraw.
+    """
+    request_for(scene["editor"], scene["dataset"]["id"])
+
+    helpers.call_action("package_delete", id=scene["dataset"]["id"])
+
+    for_dataset = [r for r in rows() if r.dataset_id == scene["dataset"]["id"]]
+    assert len(for_dataset) == 1
+    assert for_dataset[0].status == umss_model.ANNULLED
+    assert for_dataset[0].status != umss_model.CANCELLED
+    assert for_dataset[0].motive == umss_model.MOTIVE_DATASET_DELETED
+    assert for_dataset[0].decided_at is not None
+
+
+def test_deleting_the_dataset_by_name_annuls_the_pending_request(scene, store):
+    """The hook's docstring claims a dataset **name** is legal input to
+    `package_delete` and is resolved to the canonical id before the row is
+    matched. Source reading confirmed the mechanism but no executed test did;
+    this closes that gap.
+
+    A **pin for an untested path, not a RED**: it passes against the WU2 hook
+    as first written, because that hook already resolved the name through
+    `model.Package.get`. No source code changed for this test.
+    """
+    dataset_name = scene["dataset"]["name"]
+    request_for(scene["editor"], scene["dataset"]["id"])
+
+    helpers.call_action("package_delete", id=dataset_name)
+
+    for_dataset = [r for r in rows() if r.dataset_id == scene["dataset"]["id"]]
+    assert len(for_dataset) == 1
+    assert for_dataset[0].status == umss_model.ANNULLED
+    assert for_dataset[0].motive == umss_model.MOTIVE_DATASET_DELETED
+
+
+def test_deleting_a_dataset_with_no_pending_request_is_a_clean_no_op(scene, store):
+    """The ordinary delete path with the plugin loaded and no pending row: the
+    hook returns without touching anything, and the deletion still commits."""
+    dataset_id = scene["second_dataset"]["id"]
+
+    helpers.call_action("package_delete", id=dataset_id)
+
+    assert [r for r in rows() if r.dataset_id == dataset_id] == []
+    assert ckan_model.Session.get(ckan_model.Package, dataset_id).state == "deleted"
+
+
+def test_deleting_a_dataset_without_the_store_table_is_a_clean_no_op(scene):
+    """The plugin is loaded but this extension's table is absent — the state
+    `clean_db` leaves before `migrate_db_for` rebuilds it, and the state the
+    wall's tests (`tests/test_auth.py`) run in. There can be no pending row, and
+    the ordinary delete must not abort its transaction on the missing table.
+
+    This pins the hook's existence guard directly; before it, the delete raised
+    `ProgrammingError: relation "publication_requests" does not exist`.
+    """
+    dataset_id = scene["second_dataset"]["id"]
+
+    helpers.call_action("package_delete", id=dataset_id)
+
+    assert ckan_model.Session.get(ckan_model.Package, dataset_id).state == "deleted"

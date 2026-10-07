@@ -211,6 +211,7 @@ def publication_publish(context, data_dict):
     if moot is not None:
         moot.status = umss_model.ANNULLED
         moot.decided_at = now
+        moot.motive = umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH
 
     row = umss_model.PublicationRequest(
         dataset_id=dataset_id,
