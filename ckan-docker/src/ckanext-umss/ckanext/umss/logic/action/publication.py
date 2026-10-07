@@ -10,11 +10,24 @@ organization admin nor a sysadmin, but it does **not** close the stock
 is an approver to the wall — so a raw core call is a second, unrecorded door
 until `A3` closes it.
 
-They write the record and flip the value in one transaction (D5). Measured: the
-update path does not commit on its own — `package_patch`
-(`ckan/logic/action/patch.py:17`) delegates to `package_update`
-(`ckan/logic/action/update.py:234`) and that file has no `Session.commit()`
-between them — so the single commit below is what covers both writes.
+They write the record and flip the value in one commit (D5) because
+`package_patch` commits the session it is handed. Measured against the CKAN
+source: `package_patch` (`ckan/logic/action/patch.py:17`) delegates to
+`package_update` (`ckan/logic/action/update.py:234`), which calls
+`model.repo.commit()` at `update.py:451` unless `context['defer_commit']` is set,
+and `patch.py` never sets it. `model.repo.commit` is `model.Session.commit`
+(`ckan/model/__init__.py:204`, `:400`), the same session this module holds as
+`_Session`, and `package_patch`'s context is given that session by
+`_prepopulate_context` (`ckan/logic/__init__.py:313`). So the staged row is
+committed by the flip's own commit, and the trailing `_Session.commit()` below
+is a second, no-op commit.
+
+The `either both writes or neither` claim (A2.5) is measured only for a failure
+**before** that commit: `_commit_row`'s rollback then discards the staged row. A
+failure **after** `model.repo.commit()` — between it and the end of the action —
+is **unproven**: the flip is already durable and the rollback can no longer undo
+the row. This docstring does not claim otherwise, and no mechanism for that
+window is invented here.
 
 `requested_by` and `approved_by` hold **user ids**, CKAN's convention
 (`package_show` answers `creator_user_id`).
@@ -155,8 +168,14 @@ def _flip_to_public(context, dataset_id):
 def _commit_row(row, context, flip=False):
     """Write the record and, when asked, the flip — in one commit.
 
-    A failure before that commit rolls back and re-raises, so an
-    `approved`/`consumed` row cannot survive a flip that did not happen (A2.5).
+    `package_patch` commits the session it is handed (`update.py:451`), and that
+    session is this module's `_Session`, so the row staged here is committed by
+    the flip's own commit rather than by the trailing `_Session.commit()`. What
+    the rollback guarantees is the window **before** that commit: a failure
+    there discards the staged row and re-raises, so a row cannot survive a flip
+    that never committed. A failure **after** the commit is not rolled back —
+    the flip is already durable — so the "either both writes or neither" claim
+    (A2.5) is measured for the first window and **unproven** for the second.
     """
     _Session.add(row)
     try:

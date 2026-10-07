@@ -210,7 +210,13 @@ def publication_publish(context, data_dict):
     caller would only be piling up identical `approved` rows (A2's review,
     R3-003).
 
-    `auth_sysadmins_check` is load-bearing for that second guard, exactly as it
+    The **capacity** predicate runs before the **state** predicate, so a
+    non-sysadmin is denied as a non-sysadmin whatever the dataset's visibility.
+    That preserves master's answer for every non-sysadmin exactly — the same
+    caller, the same `PUBLISH_DENIED_MSG` — and lets the state guard narrow only
+    the sysadmin, the one caller the amendment lets through.
+
+    `auth_sysadmins_check` is load-bearing for that state guard, exactly as it
     is for `publication_request_decide`. Without it CKAN short-circuits every
     sysadmin to success *before* this function runs (`ckan/authz.py:224-228`);
     since the amendment makes this action sysadmin-only, the already-public
@@ -222,10 +228,10 @@ def publication_publish(context, data_dict):
     dataset = model.Package.get(data_dict.get("dataset_id") or "")
     if dataset is None:
         return {"success": True}
-    if not dataset.private:
-        return {"success": False, "msg": ALREADY_PUBLIC_MSG}
     if not ckan_authz.is_sysadmin(context.get("user")):
         return {"success": False, "msg": PUBLISH_DENIED_MSG}
+    if not dataset.private:
+        return {"success": False, "msg": ALREADY_PUBLIC_MSG}
     return {"success": True}
 
 

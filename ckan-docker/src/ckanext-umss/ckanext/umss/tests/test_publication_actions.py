@@ -653,14 +653,40 @@ def test_publish_refuses_a_dataset_that_is_already_public(scene, store):
     """A second direct publish of an already public dataset is refused by the
     auth, the way `publication_request_create` refuses one: the flip would be a
     no-op and the caller would only be piling up identical `approved` rows
-    (A2's review, R3-003)."""
+    (A2's review, R3-003). The caller here is the only one master lets through,
+    and `auth_sysadmins_check` is what makes the guard reachable for them."""
     sysadmin = factories.Sysadmin()
     call_as(sysadmin, "publication_publish", dataset_id=scene["second_dataset"]["id"])
     before = len(rows())
 
-    refused(sysadmin, "publication_publish", dataset_id=scene["second_dataset"]["id"])
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(sysadmin, "publication_publish", dataset_id=scene["second_dataset"]["id"])
 
+    assert auth_publication.ALREADY_PUBLIC_MSG in str(excinfo.value)
+    assert auth_publication.PUBLISH_DENIED_MSG not in str(excinfo.value)
     assert len(rows()) == before
+
+
+def test_a_non_sysadmin_publishing_an_already_public_dataset_gets_the_sysadmin_denial(
+    scene, store
+):
+    """The order is capacity first, then state: a non-sysadmin is denied as a
+    non-sysadmin whatever the dataset's visibility. Answering
+    `ALREADY_PUBLIC_MSG` here would be a behaviour change against master for a
+    caller who was never allowed in — the governance amendment closed the
+    org-admin direct path, and the refusal text is part of that contract."""
+    sysadmin = factories.Sysadmin()
+    call_as(sysadmin, "publication_publish", dataset_id=scene["second_dataset"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_publish",
+            dataset_id=scene["second_dataset"]["id"],
+        )
+
+    assert auth_publication.PUBLISH_DENIED_MSG in str(excinfo.value)
+    assert auth_publication.ALREADY_PUBLIC_MSG not in str(excinfo.value)
 
 
 def test_create_loses_the_race_by_returning_the_winners_row(scene, store, monkeypatch):
