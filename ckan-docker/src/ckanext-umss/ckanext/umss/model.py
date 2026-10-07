@@ -30,7 +30,7 @@ import ckan.model.types as _types
 from ckan.model.base import BaseModel
 
 
-__all__ = ["PublicationRequest", "STATUSES"]
+__all__ = ["PublicationRequest", "STATUSES", "VISIBILITIES"]
 
 
 # The five outcomes D2 declares. `annulled` is the mining's addition: it marks a
@@ -43,6 +43,18 @@ CANCELLED = "cancelled"
 ANNULLED = "annulled"
 
 STATUSES = (PENDING, APPROVED, REJECTED, CANCELLED, ANNULLED)
+
+# The two visibilities a request may ask for (D2).
+VISIBILITIES = ("public", "private")
+
+
+def one_of(column, values):
+    """The SQL of a membership constraint, derived from the declared values.
+
+    Derived rather than hand-written so the constraint and the tuple it
+    constrains cannot drift apart.
+    """
+    return "{} IN ({})".format(column, ", ".join("'{}'".format(v) for v in values))
 
 
 class PublicationRequest(domain_object.DomainObject, BaseModel):
@@ -67,6 +79,17 @@ class PublicationRequest(domain_object.DomainObject, BaseModel):
         ),
         sa.Column("decided_at", sa.DateTime),
         sa.Column("consumed_at", sa.DateTime),
+        # The two declared domains, enforced by the database and not only by the
+        # actions: a status or a visibility outside its set is a bug that should
+        # fail loudly where the row is written. A1's review marked the absence of
+        # the `status` one (R3-STATUS-UNENFORCED).
+        sa.CheckConstraint(
+            one_of("status", STATUSES), name="ck_publication_requests_status"
+        ),
+        sa.CheckConstraint(
+            one_of("requested_visibility", VISIBILITIES),
+            name="ck_publication_requests_visibility",
+        ),
         # D2's invariant, as a partial index: one `pending` per dataset, and no
         # constraint at all on settled rows.
         sa.Index(

@@ -36,6 +36,19 @@ def upgrade():
         sa.Column(u"created_at", sa.DateTime, nullable=False),
         sa.Column(u"decided_at", sa.DateTime),
         sa.Column(u"consumed_at", sa.DateTime),
+        # The declared domains, written out rather than imported from the model:
+        # a migration is a statement about one point in time and must not change
+        # meaning when the model moves. What keeps the two in step is the tests,
+        # which insert every value the *model* declares and a value it does not
+        # (`tests/test_publication_store.py`, A1.5).
+        sa.CheckConstraint(
+            u"status IN ('pending', 'approved', 'rejected', 'cancelled', 'annulled')",
+            name=u"ck_publication_requests_status",
+        ),
+        sa.CheckConstraint(
+            u"requested_visibility IN ('public', 'private')",
+            name=u"ck_publication_requests_visibility",
+        ),
     )
     op.create_index(
         u"idx_publication_requests_one_pending_per_dataset",

@@ -14,11 +14,17 @@ imported without migrations applied, corresponding table can be missing from
 DB", `ckan/model/__init__.py:285-292`). So an extension's table exists in tests
 only because `migrate_db_for` applies its own migration tree — CKAN's own
 fixture for this, and the same mechanism production's `ckan db upgrade` uses.
-The side effect is that D2's index is proven **as the migration wrote it**: a
-migration that forgot the partial index would fail
-`test_a_settled_row_does_not_block_a_new_pending_one`.
+The side effect is that D2's index, and the CheckConstraints that carry the two
+declared domains, are proven **as the migration wrote them**: a migration that
+forgot the partial index would fail
+`test_a_settled_row_does_not_block_a_new_pending_one`, and one whose status set
+disagreed with the model's `STATUSES` would fail either
+`test_every_declared_outcome_is_storable` or
+`test_the_migration_rejects_a_status_outside_the_declared_set`.
 """
 import datetime
+import re
+import uuid
 
 import pytest
 import sqlalchemy as sa
@@ -49,9 +55,16 @@ DECLARED_COLUMNS = (
     "consumed_at",
 )
 
-# Every outcome D2 declares, including the `annulled` one the mining added to
-# the PRD schema.
-STATUSES = ("pending", "approved", "rejected", "cancelled", "annulled")
+# The columns D2 declares as mandatory — the ones the migration writes with
+# `nullable=False`. `id` is the primary key and carries a default instead, so it
+# is absent here on purpose.
+NOT_NULL_COLUMNS = (
+    "dataset_id",
+    "requested_visibility",
+    "status",
+    "requested_by",
+    "created_at",
+)
 
 
 @pytest.fixture
@@ -160,7 +173,7 @@ def test_a_pending_row_carries_no_decision_and_no_consumption(store):
     assert row.consumed_at is None
 
 
-@pytest.mark.parametrize("status", STATUSES)
+@pytest.mark.parametrize("status", umss_model.STATUSES)
 def test_every_declared_outcome_is_storable(store, status):
     save(make_request(status=status))
 
@@ -217,3 +230,101 @@ def test_a_settled_row_does_not_block_a_new_pending_one(store):
 
     pending = [row for row in read_back() if row.status == "pending"]
     assert len(pending) == 1
+
+
+# ---------------------------------------------------------------------------
+# A1.5 — the constraints the *migration* wrote, not the ones the model declares
+# ---------------------------------------------------------------------------
+
+
+def insert_raw(**overrides):
+    """Insert one row with raw SQL.
+
+    Raw, not through the model: a Python-side default fills a column an ORM
+    insert leaves out, and that is exactly what these tests must not allow.
+    """
+    row = {
+        "id": str(uuid.uuid4()),
+        "dataset_id": "dataset-1",
+        "requested_visibility": "public",
+        "status": "pending",
+        "requested_by": "requester-1",
+        "created_at": datetime.datetime(2026, 10, 7, 12, 0, 0),
+    }
+    row.update(overrides)
+    ckan_model.Session.execute(
+        sa.text(
+            "insert into publication_requests ({columns}) values ({values})".format(
+                columns=", ".join(row),
+                values=", ".join(":" + name for name in row),
+            )
+        ),
+        row,
+    )
+
+
+def refused_by_the_database(**overrides):
+    with pytest.raises(sa.exc.IntegrityError):
+        insert_raw(**overrides)
+    ckan_model.Session.rollback()
+
+
+@pytest.mark.parametrize("column", NOT_NULL_COLUMNS)
+def test_the_migration_rejects_null_in_a_mandatory_column(store, column):
+    refused_by_the_database(**{column: None})
+
+
+def test_the_migration_rejects_a_status_outside_the_declared_set(store):
+    # The behavioural half only. Rejection cannot pin the set: a constraint
+    # *wider* than the model's declaration would still refuse this value, so the
+    # set itself is pinned by `test_the_migration_pins_status_to_the_declared_set`
+    # below, which reads the constraint out of the catalog.
+    refused_by_the_database(status="banana")
+
+
+def test_the_migration_rejects_a_visibility_outside_the_declared_set(store):
+    refused_by_the_database(requested_visibility="maybe")
+
+
+def constraint_values(name):
+    """The value set a live CheckConstraint allows, read from the catalog.
+
+    Postgres renders `x IN ('a', 'b')` as `x = ANY (ARRAY['a'::text,
+    'b'::text])`, so the quoted values are what there is to read. This is the
+    only way to pin the *set*: probing a value can prove it is refused, never
+    that no extra value is allowed. The regex is tied to that rendering, which
+    is why it is asserted against `pg_get_constraintdef` rather than assumed.
+    """
+    definition = ckan_model.Session.execute(
+        sa.text(
+            "select pg_get_constraintdef(oid) from pg_constraint"
+            " where conname = :name"
+            " and conrelid = 'publication_requests'::regclass"
+        ),
+        {"name": name},
+    ).scalar()
+    assert definition, "no such constraint: {}".format(name)
+    return set(re.findall(r"'([a-z_]+)'::text", definition))
+
+
+def test_the_migration_pins_status_to_the_declared_set(store):
+    assert constraint_values("ck_publication_requests_status") == set(
+        umss_model.STATUSES
+    )
+
+
+def test_the_migration_pins_visibility_to_the_declared_set(store):
+    assert constraint_values("ck_publication_requests_visibility") == set(
+        umss_model.VISIBILITIES
+    )
+
+
+def test_the_migration_can_be_reversed(store, migrate_db_for):
+    migrate_db_for("umss", "base", forward=False)
+    assert not sa.inspect(ckan_model.Session.bind).has_table("publication_requests")
+
+    # Re-applied on purpose: `clean_db` will not rebuild it for the tests that
+    # follow in this session, because CKAN's `init_db` replays the core
+    # migrations only.
+    migrate_db_for("umss")
+    assert sa.inspect(ckan_model.Session.bind).has_table("publication_requests")

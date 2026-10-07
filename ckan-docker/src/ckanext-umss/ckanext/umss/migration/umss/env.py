@@ -1,6 +1,8 @@
 """
 Alembic environment for `ckanext-umss`, copied from CKAN's own example
-(`ckanext/example_database_migrations/migration/example_database_migrations/env.py`).
+(`ckanext/example_database_migrations/migration/example_database_migrations/env.py`),
+with one deliberate difference: the `fileConfig` call is gone, for the reason
+recorded where it used to be.
 
 The one line that matters for coexistence: `version_table` is derived from this
 file's parent directory, so the extension keeps its own `umss_alembic_version`
@@ -15,7 +17,6 @@ created (Phase A1.4).
 from __future__ import with_statement
 
 import os
-from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
@@ -24,9 +25,14 @@ from sqlalchemy import engine_from_config, pool
 # access to the values within the .ini file in use.
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
-fileConfig(config.config_file_name)
+# Deliberately **not** `fileConfig(config.config_file_name)`, which CKAN's own
+# `ckan/migration/env.py:6` has commented out as well. These migrations run
+# inside the `ckan db upgrade` process — and inside pytest, through
+# `migrate_db_for` — where logging is already configured: reconfiguring it here
+# would clobber the host's loggers, and an Alembic `Config` built without a file
+# would make it raise before a single statement of DDL runs. The `[loggers]`
+# section of `alembic.ini` is for a standalone `alembic` invocation only, which
+# is not how this tree is run.
 
 target_metadata = None
 
