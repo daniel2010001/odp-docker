@@ -10,9 +10,14 @@ per dataset**, while a dataset keeps any number of settled rows. The index is
 partial on purpose — a plain unique index on `dataset_id` would forbid the
 second request a dataset will legitimately need after the first one is decided.
 
-The table is created by `migration/umss/versions/0001_add_publication_requests.py`
-outside tests (D3). Tests get it from this metadata through `clean_db`, which is
-why the store tests cannot prove the migration ran.
+The table is created by `migration/umss/versions/0001_add_publication_requests.py`,
+in tests as well as in production. CKAN's harness does not build an extension's
+table from model metadata: `clean_db` reaches `rebuild_db`, whose `init_db`
+replays the *core* migrations only, and `delete_all` explicitly tolerates a
+missing extension table. So the store tests apply this extension's own tree
+through CKAN's `migrate_db_for` fixture, and they run against the table the
+migration built — which is what keeps this model and that migration from
+drifting apart.
 """
 from __future__ import annotations
 

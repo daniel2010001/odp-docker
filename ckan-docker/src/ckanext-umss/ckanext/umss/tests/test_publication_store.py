@@ -201,16 +201,12 @@ def test_a_pending_row_for_another_dataset_is_allowed(store):
 def test_settled_rows_are_not_constrained_by_the_index(store):
     # The index is *partial*. A plain unique index on `dataset_id` would refuse
     # this, and it would also refuse the second request a dataset legitimately
-    # needs after the first one is settled.
-    save(
-        make_request(dataset_id="dataset-1", status="approved"),
-        make_request(dataset_id="dataset-1", status="approved"),
-        make_request(dataset_id="dataset-1", status="rejected"),
-        make_request(dataset_id="dataset-1", status="cancelled"),
-        make_request(dataset_id="dataset-1", status="annulled"),
-    )
+    # needs after the first one is settled. The count comes from the rows this
+    # test inserts, not from `STATUSES`: `pending` is not among them.
+    settled = ("approved", "approved", "rejected", "cancelled", "annulled")
+    save(*(make_request(dataset_id="dataset-1", status=s) for s in settled))
 
-    assert len(read_back()) == len(STATUSES)
+    assert len(read_back()) == len(settled)
 
 
 def test_a_settled_row_does_not_block_a_new_pending_one(store):
