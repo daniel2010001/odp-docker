@@ -4,11 +4,15 @@ The five publication actions: `design.md` D4, and the door of D5.
 They are the queue and the door at once: `publication_request_create` /
 `_cancel` / `_decide` / `_list` are the queue, and `_decide {approve: true}` and
 `publication_publish` are the only **recorded** way a dataset becomes public.
-The wall in `ckanext.umss.auth` refuses a flip by a caller who is neither an
-organization admin nor a sysadmin, but it does **not** close the stock
-`package_patch {private: false}` route for an organization admin — that caller
-is an approver to the wall — so a raw core call is a second, unrecorded door
-until `A3` closes it.
+The wall in `ckanext.umss.auth` refuses a flip by every caller core admits, the
+organization admin included: the stock
+`package_patch {private: false}` route is refused, as is any change to `state`,
+`package_create` cannot store a public dataset, and `bulk_update_public` is
+covered by a chain of its own, which answers every non-sysadmin directly because
+it does not call `next_auth`. Core itself refuses `member`, a cross-organization
+`editor` and anonymous callers before the wall runs. So no raw core call is a
+second, unrecorded door for a caller below a sysadmin; the sysadmin's own stock
+bypass remains.
 
 They write the record and flip the value in one commit (D5) because
 `package_patch` commits the session it is handed. Measured against the CKAN

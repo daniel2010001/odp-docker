@@ -7,7 +7,7 @@ defines no permission of its own. `has_user_permission_for_group_or_org`
 down the organization hierarchy, which is why a parent org's admin can decide a
 child org's request.
 
-These are plain auth functions for the extension's own action names. The two
+These are plain auth functions for the extension's own action names. The three
 *chained* functions that guard core's actions live in `ckanext.umss.auth`, and
 are a different mechanism on purpose.
 
@@ -195,9 +195,11 @@ def publication_request_decide(context, data_dict):
 def publication_publish(context, data_dict):
     """The governance amendment: a sysadmin publishing on their own authority.
 
-    The organization-admin direct path through this action is closed. The org
-    admin keeps the stock `package_patch {private: false}` route, which the wall
-    in `ckanext.umss.auth` owns; this action is a sysadmin's.
+    The organization-admin direct path through this action is closed, and the
+    stock `package_patch {private: false}` route is closed too: the wall in
+    `ckanext.umss.auth` refuses it for the org admin (and for every other
+    caller below a sysadmin) with `PUBLISH_VIA_FLOW_MSG`. This action is a
+    sysadmin's.
 
     The dataset is resolved first, because contract rule 7 requires an
     unresolvable `dataset_id` to answer `NotFound`, not `403`: the auth answers
