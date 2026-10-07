@@ -10,13 +10,27 @@ organization admin nor a sysadmin, but it does **not** close the stock
 is an approver to the wall — so a raw core call is a second, unrecorded door
 until `A3` closes it.
 
-`_decide {approve: true}` and `_publish` write the record **and** flip the value
-in one transaction (D5): the row is added to the session and `package_patch` is
-called with `ignore_auth` before the single commit, so a flip that fails leaves
-no `approved`/`consumed` row behind.
+They write the record and flip the value in one commit (D5) because
+`package_patch` commits the session it is handed. Measured against the CKAN
+source: `package_patch` (`ckan/logic/action/patch.py:17`) delegates to
+`package_update` (`ckan/logic/action/update.py:234`), which calls
+`model.repo.commit()` at `update.py:451` unless `context['defer_commit']` is set,
+and `patch.py` never sets it. `model.repo.commit` is `model.Session.commit`
+(`ckan/model/__init__.py:204`, `:400`), the same session this module holds as
+`_Session`, and `package_patch`'s context is given that session by
+`_prepopulate_context` (`ckan/logic/__init__.py:313`). So the staged row is
+committed by the flip's own commit, and the trailing `_Session.commit()` below
+is a second, no-op commit.
 
-`requested_by` and `approved_by` hold **user ids**, the convention the rest of
-CKAN follows (`package_show` answers `creator_user_id`, not a name).
+The `either both writes or neither` claim (A2.5) is measured only for a failure
+**before** that commit: `_commit_row`'s rollback then discards the staged row. A
+failure **after** `model.repo.commit()` — between it and the end of the action —
+is **unproven**: the flip is already durable and the rollback can no longer undo
+the row. This docstring does not claim otherwise, and no mechanism for that
+window is invented here.
+
+`requested_by` and `approved_by` hold **user ids**, CKAN's convention
+(`package_show` answers `creator_user_id`).
 """
 from __future__ import annotations
 
@@ -25,8 +39,10 @@ import datetime
 import ckan.authz as ckan_authz
 import ckan.model as model
 import ckan.plugins.toolkit as toolkit
+import sqlalchemy as sa
 
 from ckanext.umss import model as umss_model
+from ckanext.umss.logic import caller_id
 from ckanext.umss.logic.auth.publication import UPDATE_PERMISSION
 
 
@@ -70,11 +86,6 @@ def _existing_dataset(dataset_id):
     if dataset is None:
         raise toolkit.ObjectNotFound("Dataset not found: %s" % dataset_id)
     return dataset
-
-
-def _caller_id(context):
-    user = context.get("auth_user_obj") or model.User.get(context.get("user"))
-    return user.id if user else None
 
 
 def _names_for(user_ids):
@@ -155,11 +166,16 @@ def _flip_to_public(context, dataset_id):
 
 
 def _commit_row(row, context, flip=False):
-    """Write the record and, when asked, the flip — in one transaction.
+    """Write the record and, when asked, the flip — in one commit.
 
-    `package_patch` commits the session it is handed, so anything that fails
-    before that commit leaves the row uncommitted; the rollback is what makes
-    "either both writes or neither" true rather than merely asserted (A2.5).
+    `package_patch` commits the session it is handed (`update.py:451`), and that
+    session is this module's `_Session`, so the row staged here is committed by
+    the flip's own commit rather than by the trailing `_Session.commit()`. What
+    the rollback guarantees is the window **before** that commit: a failure
+    there discards the staged row and re-raises, so a row cannot survive a flip
+    that never committed. A failure **after** the commit is not rolled back —
+    the flip is already durable — so the "either both writes or neither" claim
+    (A2.5) is measured for the first window and **unproven** for the second.
     """
     _Session.add(row)
     try:
@@ -187,10 +203,20 @@ def publication_request_create(context, data_dict):
         dataset_id=dataset_id,
         requested_visibility="public",
         status=umss_model.PENDING,
-        requested_by=_caller_id(context),
+        requested_by=caller_id(context),
         comments=data_dict.get("comments"),
     )
-    return _commit_row(row, context)
+    try:
+        return _commit_row(row, context)
+    except sa.exc.IntegrityError:
+        # Two identical creates can interleave between the read above and this
+        # insert. What settles that race is D2's partial unique index, and the
+        # loser answers with the winner's row — that is what "idempotent"
+        # promises. Anything else is a genuine integrity error and is re-raised.
+        existing = _pending_for(dataset_id)
+        if existing is not None:
+            return _row_dict(existing)
+        raise
 
 
 def publication_request_cancel(context, data_dict):
@@ -229,7 +255,7 @@ def publication_request_decide(context, data_dict):
 
     if data_dict.get("comments"):
         row.comments = data_dict["comments"]
-    row.approved_by = _caller_id(context)
+    row.approved_by = caller_id(context)
     row.decided_at = _now()
 
     if not approve:
@@ -247,12 +273,17 @@ def publication_publish(context, data_dict):
     A pending request for the same dataset is **annulled**, not cancelled: the
     requester did not withdraw it, a direct action by the sysadmin made it moot —
     which is what D2 added `annulled` for.
+
+    Publishing an already public dataset is refused by the auth function, the
+    way `publication_request_create` refuses one: the flip would be a no-op and
+    the caller would only be piling up identical `approved` rows (A2's review,
+    R3-003).
     """
     toolkit.check_access("publication_publish", context, data_dict)
     dataset_id = _required(data_dict, "dataset_id")
     _existing_dataset(dataset_id)
 
-    caller = _caller_id(context)
+    caller = caller_id(context)
     now = _now()
 
     moot = _pending_for(dataset_id)
@@ -279,8 +310,15 @@ def publication_request_list(context, data_dict):
     """D4's queue: what the caller may see, optionally narrowed by status.
 
     "May see" is the stock `update_dataset` capacity on the dataset's org, plus
-    the caller's own requests — a requester keeps seeing their own row even if
-    their capacity is gone.
+    the caller's own requests. The predicate stays in Python on purpose: the
+    stock helper walks the org hierarchy (`ckan/authz.py:302`), and re-writing
+    that walk in SQL is how a queue starts showing rows to the wrong org. The
+    cost is not per row, though — one query resolves every dataset's org and the
+    capacity is evaluated once per organization (R4-list-unbounded).
+
+    Declared limitation: every row of the requested status is still
+    materialized, because D4's contract has no pagination. If the portal's queue
+    needs paging, that is a contract change and it belongs to B2.
     """
     query = _Session.query(umss_model.PublicationRequest)
     status = data_dict.get("status")
@@ -288,11 +326,24 @@ def publication_request_list(context, data_dict):
         query = query.filter(umss_model.PublicationRequest.status == status)
     rows = query.order_by(umss_model.PublicationRequest.created_at).all()
 
-    caller = _caller_id(context)
+    caller = caller_id(context)
+    org_of = _orgs_by_dataset(row.dataset_id for row in rows)
+    allowed_orgs = {}
+
+    def may_see(dataset_id):
+        org_id = org_of.get(dataset_id)
+        if org_id is None:
+            return False
+        if org_id not in allowed_orgs:
+            allowed_orgs[org_id] = ckan_authz.has_user_permission_for_group_or_org(
+                org_id, context.get("user"), UPDATE_PERMISSION
+            )
+        return allowed_orgs[org_id]
+
     visible = [
         row
         for row in rows
-        if row.requested_by == caller or _may_see(context, row.dataset_id)
+        if row.requested_by == caller or may_see(row.dataset_id)
     ]
     names = _names_for(
         user_id
@@ -302,10 +353,13 @@ def publication_request_list(context, data_dict):
     return [_row_dict(row, names) for row in visible]
 
 
-def _may_see(context, dataset_id):
-    dataset = model.Package.get(dataset_id)
-    if dataset is None:
-        return False
-    return ckan_authz.has_user_permission_for_group_or_org(
-        dataset.owner_org, context.get("user"), UPDATE_PERMISSION
+def _orgs_by_dataset(dataset_ids):
+    """`{dataset_id: owner_org}` for the given ids, in one query."""
+    wanted = set(dataset_ids)
+    if not wanted:
+        return {}
+    return dict(
+        _Session.query(model.Package.id, model.Package.owner_org)
+        .filter(model.Package.id.in_(wanted))
+        .all()
     )
