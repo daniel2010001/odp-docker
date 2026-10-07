@@ -12,7 +12,8 @@ once so both sides read it from the same place.
 |---|---|
 | The five actions **as delivered** (`unit/a2-governance`, range `63ec806..HEAD`) | implement the governance amendment: `publication_publish` is `sysadmin`-only, `publication_decide` carries the four-eyes and current-capacity re-checks, a lost object is `annulled`, and the returned rows carry `requested_by_name` / `approved_by_name` |
 | The advisory corrections carried on top (`unit/a2-advisories-v2`) | the branch carries the **eight** advisory findings of A2's first review; **two of them are contract-visible** and are the ones reflected below, both **measured** by the suite: `publication_request_list` resolves every dataset's owner org in **one** query and evaluates the capacity **once per organisation** (behaviour unchanged — it narrows to the same rows — only the helper changed, and the old `_may_see` is gone); and `publication_publish` refuses an **already public** dataset |
-| **This file describes** | the contract of `unit/a2-governance`, which is **delivered and natively reviewed**, plus the two contract-visible advisory corrections of `unit/a2-advisories-v2`, plus the `A3` wall (`unit/a3-wall`): its refusal of the stock `package_patch {private: false}` route, any `state` change, a public `package_create`, and `bulk_update_public`. The wall's change is **on the branch**, not yet reviewed or delivered |
+| **This file describes** | the contract of `unit/a2-governance`, which is **delivered and natively reviewed**, plus the two contract-visible advisory corrections of `unit/a2-advisories-v2`, plus the `A3` wall (`unit/a3-wall`), **merged to `master`**: its refusal of the stock `package_patch {private: false}` route, any `state` change, a public `package_create`, and `bulk_update_public` |
+| **On `unit/titles-and-labels`** | two consumer-facing additions, **not yet reviewed or delivered**: the returned rows also carry `dataset_title` / `organization_title` (resolved in the same single query as the owner organisation, with the names' `None` / `"unknown"` fallbacks), and every refusal below reads `<frozen label>: <free prose>` with the labels declared as constants and pinned by test |
 | The review of record (**relayed**) | lineage `review-4b6ecc112fa966fa`, tier **high**, **4/4 lenses**, **approved and acknowledged**; the review authority is burned; the **9 findings are informational**, none blocking, none reopening the lineage, and they are declared as later work at the end of this file. This metadata is **relayed** from the provider's review envelope and from the state file read before acknowledgement — it is **not reproducible from the repository now** |
 | The governance amendment | `odp` commit `41de6c2`, `design.md:194,207` and `spec.md:284,586` |
 | The unit's state and what it must carry | `HANDOFF-2026-10-07.md` (tracked, repository root) |
@@ -26,9 +27,10 @@ not as something a later reader can re-derive from disk.
 
 **The table below can be wired against.** It is the delivered shape, not a proposal: the earlier
 warning — "do not wire a consumer until the unit lands" — no longer applies. Of the two adoption costs
-it named, the missing-key cost is **closed** (the two name keys now exist); the `403` cost is
-**documented, not closed** — the four-eyes refusal is still a `403`, and a consumer must still read the
-message to tell it apart from other `403`s.
+it named, the missing-key cost is **closed** (the two name keys and the two title keys now exist); the
+`403` cost is **bounded by labels, not closed** — a refusal is still a `403`, but a consumer matches
+the frozen label (`<label>: <sentence>`), and the sentence after it can be reworded without breaking
+the branch.
 
 **A `403` from a stock core call can now be ours.** A `403` from `package_patch`,
 `package_update` or `bulk_update_public` is no longer necessarily CKAN's own: with `A3`, the wall
@@ -58,8 +60,8 @@ The bypasses that remain are named individually under *Named bypasses* below.
 | `publication_request_create` | `dataset_id`, `comments?` | the row | a caller who can `update_dataset` in the owning org, on a **private** dataset. Idempotent: answers the existing `pending` row |
 | `publication_request_cancel` | `request_id` | the row | the requester, or an org `admin` |
 | `publication_request_decide` | `request_id`, `approve` (bool), `comments?` | the row | an `admin` of the owning org, an `admin` of a **parent** org, or a `sysadmin` — **never the requester** |
-| `publication_publish` | `dataset_id`, `comments?` | the row | **`sysadmin` only**, and only on a **private** dataset. An already public dataset is refused (`403`, `"That dataset is already public"`) instead of accumulating a second `approved` row — the same guard `publication_request_create` applies. Capacity is checked **before** state, so a non-sysadmin gets the sysadmin denial whatever the dataset's visibility: its `403` text does not change with the dataset (measured: `test_publish_refuses_a_dataset_that_is_already_public` for the sysadmin, `test_a_non_sysadmin_publishing_an_already_public_dataset_gets_the_sysadmin_denial` for the non-sysadmin) |
-| `publication_request_list` | `status?` | a list of rows | **any caller may invoke it**: the auth function returns `success: True` unconditionally, and the **action body** narrows the result to what the caller may see (`_orgs_by_dataset` resolves every dataset's owner org in one query, the `update_dataset` capacity is evaluated once per organisation, plus the caller's own rows). An anonymous caller is **not** refused before the auth function runs (the same mechanism as rule 7): measured, an anonymous call reached the body and returned a `500` because the dev database has no store table, not a `403` |
+| `publication_publish` | `dataset_id`, `comments?` | the row | **`sysadmin` only**, and only on a **private** dataset. An already public dataset is refused (`403`, `"Already public: that dataset is already public"`) instead of accumulating a second `approved` row — the same guard `publication_request_create` applies. Capacity is checked **before** state, so a non-sysadmin gets the sysadmin denial whatever the dataset's visibility: its `403` text does not change with the dataset (measured: `test_publish_refuses_a_dataset_that_is_already_public` for the sysadmin, `test_a_non_sysadmin_publishing_an_already_public_dataset_gets_the_sysadmin_denial` for the non-sysadmin) |
+| `publication_request_list` | `status?` | a list of rows | **any caller may invoke it**: the auth function returns `success: True` unconditionally, and the **action body** narrows the result to what the caller may see (`_datasets_by_id` resolves every dataset's owner org and both titles in one query, the `update_dataset` capacity is evaluated once per organisation, plus the caller's own rows). An anonymous caller is **not** refused before the auth function runs (the same mechanism as rule 7): measured, an anonymous call reached the body and returned a `500` because the dev database has no store table, not a `403` |
 
 ## The rules that are not visible in the names
 
@@ -77,6 +79,34 @@ The bypasses that remain are named individually under *Named bypasses* below.
    but does not resolve** answers the neutral token `"unknown"` — **never the raw id** (a field called
    `..._name` must never contain an id). `approved_by_name` is only meaningful on `approved` and
    `rejected`; on `cancelled` the requester withdrew and on `annulled` there was no decision.
+
+   **The queue also carries the dataset's and the organisation's titles**, so the portal can name the
+   dataset without an N-per-row `package_show`: `dataset_title` and `organization_title`. They are the
+   package's own `title` and a join to the owner organisation's `title`, resolved — **measured** by the
+   suite (`test_list_resolves_dataset_and_org_titles_in_one_query_for_the_whole_page`,
+   `test_a_single_row_return_resolves_dataset_titles_in_one_query`) — **in the same single query** that
+   already resolved the owner organisation for the page:
+
+   ```sql
+   SELECT package.id, package.owner_org, package.title, "group".id, "group".title
+   FROM package LEFT OUTER JOIN "group" ON "group".id = package.owner_org
+   WHERE package.id IN (...)
+   ```
+
+   The cost is stated precisely, not as "no query added". On the **list** path the titles add **no**
+   query — they ride the organisation query, and a page of three datasets measures exactly one such
+   statement. A **single-row** return, by contrast, costs **one extra resolver query per call**: where
+   it previously ran one presentation resolver (the names), it now runs two (the names and this one).
+   The resolver itself is still one statement per call
+   (`test_a_single_row_return_resolves_dataset_titles_in_one_query`). The `"group".id` column is what
+   lets the code tell a **missing** group from a group with a blank title.
+
+   The two titles follow the names' fallback shape — **not** the raw id in a field called `..._title`:
+   an **unset** source field answers `None` (an unowned dataset has no organisation, so
+   `organization_title` is `None`); a source that **is set but does not resolve** (the dataset is gone,
+   or its `owner_org` points at a missing group) answers the neutral token `"unknown"`; and a source
+   that resolves but is **empty or whitespace-only** answers `None` in both fields — the consumer's
+   natural `title ?? fallback` must not receive an empty string that renders as a blank line.
 4. **`comments` is required when rejecting**, optional when approving.
 5. **The refusal of an approver's own request is distinguishable** (`403` with its own message, the row
    stays `pending`), never a silent no-op.
@@ -93,13 +123,22 @@ The bypasses that remain are named individually under *Named bypasses* below.
    **Measured, and anonymous callers are inside the rule.** An earlier draft of this file claimed the
    opposite — that `publication_publish` carries no `auth_allow_anonymous_access`, so CKAN would refuse
    an anonymous caller before the auth function ran and they would get a `403` instead of `NotFound`.
-   That claim was **wrong**. Measured against the running dev API:
+   That claim was **wrong**. Re-measured against the running dev stack on **2026-10-07** (the dev
+   server bind-mounts this working tree, so it served the labelled message), anonymous, no
+   `Authorization` header:
+
+   ```sh
+   curl -s -X POST http://localhost:5000/api/3/action/publication_publish \
+       -H "Content-Type: application/json" -d '{"dataset_id":"no-such-dataset-xyz"}'
+   curl -s -X POST http://localhost:5000/api/3/action/publication_publish \
+       -H "Content-Type: application/json" -d '{"dataset_id":"consumo-energetico-por-edificio"}'
+   ```
 
    ```
-   anonymous + unknown dataset_id -> 404 {"__type":"Not Found Error",
+   no-such-dataset-xyz             -> 404 {"__type":"Not Found Error",
        "message":"Not found: Dataset not found: no-such-dataset-xyz"}
-   anonymous + valid dataset_id   -> 403 {"__type":"Authorization Error",
-       "message":"Access denied: Only a sysadmin may publish a dataset directly"}
+   consumo-energetico-por-edificio -> 403 {"__type":"Authorization Error",
+       "message":"Access denied: Not a sysadmin: only a sysadmin may publish a dataset directly"}
    ```
 
    So the auth function **does** run for an anonymous caller and its `NotFound` path is reachable; the
@@ -117,76 +156,128 @@ The bypasses that remain are named individually under *Named bypasses* below.
 
 Publication is refused with one of **three** texts, two of them in the wall:
 
-- the wall in `ckanext.umss.auth` answers `PUBLISH_VIA_FLOW_MSG` (`"Publication goes through the
-  publication flow, not package_patch"`) to an **approver** — the organization `admin` the flow
-  authorizes — on the stock `package_update` path it chains onto;
-- the same wall answers `PUBLISH_DENIED_MSG` (`"Only an organization administrator can publish a
-  dataset"`) to a caller core admits whose request the approver predicate rejects — in practice an
-  organization `editor`. Callers core refuses first (`member`, a cross-organization `editor`, an
-  anonymous caller) never reach the wall on that path, and `bulk_update_public` answers every
-  authenticated non-sysadmin that reaches it, because its chain does not call `next_auth`;
-- the `publication_publish` action answers `"Only a sysadmin may publish a dataset directly"`
-  (`PUBLISH_DENIED_MSG` in its own module; the two modules name a constant the same way).
+- the wall in `ckanext.umss.auth` answers the label `Publication flow` (`PUBLISH_VIA_FLOW_MSG`) to an
+  **approver** — the organization `admin` the flow authorizes — on the stock `package_update` path it
+  chains onto;
+- the same wall answers the label `Publish denied` (`PUBLISH_DENIED_MSG`) to a caller core admits
+  whose request the approver predicate rejects — in practice an organization `editor`. Callers core
+  refuses first (`member`, a cross-organization `editor`, an anonymous caller) never reach the wall on
+  that path, and `bulk_update_public` answers every authenticated non-sysadmin that reaches it,
+  because its chain does not call `next_auth`;
+- the `publication_publish` action answers the label `Not a sysadmin` (its own `PUBLISH_DENIED_MSG`;
+  the two modules name a constant the same way, which is exactly why the labels differ).
 
 The claim this section used to carry — that an organization `admin` may still use the stock
 `package_patch {private: false}` route (the wall's door) — is **false as of `A3`**: that route is
 refused, with the flow message above. A consumer that reads only one of the three, or assumes they
 encode the same rule, will be wrong.
 
-### The refusal literals are interface
+### The refusal labels are interface
 
-The portal tells certain refusals apart by matching the `message` text, because CKAN gives no
-machine-readable code for an authorization failure: it always arrives as
-`{"__type": "Authorization Error", "message": …}`. The portal reads those texts from **one**
+The portal tells certain refusals apart by matching the **label** that opens the `message`, because
+CKAN gives no machine-readable code for an authorization failure: it always arrives as
+`{"__type": "Authorization Error", "message": …}`. The author's decision (2026-10-07) fixes the shape
+
+```
+<frozen label>: <free prose>
+```
+
+A **literal is a discriminator, not user copy**: the **label** is the interface the portal matches,
+and the sentence after the colon is free prose — the sentence the end user reads is the consumer's
+own, so improving our wording can no longer break the portal. The portal reads the labels from **one**
 constant that points at this file — the pointer is **relayed** from the consuming session, not
 reproducible here. That single pointer is what makes this file the one place that can go stale: a
-literal reworded here, or restated here and no longer matching the code, breaks the consumer's
-ability to distinguish the refusal, and nothing in this repository fails. That is why the six refusal
-literals below — and the `comments` key of the missing-comment rejection, which is machine-readable
-without matching prose — are **pinned by test** (`tests/test_auth.py`,
-`tests/test_publication_actions.py`) rather than trusted to review. Each row's value and firing
-condition is **measured** by the suite.
+label reworded here, or restated here and no longer matching the code, breaks the consumer's ability
+to distinguish the refusal, and nothing in this repository fails. That is why the nine **labels**
+below — not their sentences — and the `comments` key of the missing-comment rejection (which is
+machine-readable without matching prose) are **pinned by test** (`tests/test_auth.py`,
+`tests/test_publication_actions.py`) rather than trusted to review: a reworded sentence does **not**
+fail a test, a changed label **does**. Beyond the pins, an **invariant test**
+(`test_every_refusal_message_begins_with_a_declared_label`) walks every refusal **declared as a
+module-level `*_MSG` constant** in these two modules and fails if any does not open with a declared
+label, so a refusal added that way cannot land unlabeled. Its reach is exactly that: it does **not**
+see inline strings, handler-local strings, `ValidationError` dict entries, or differently-named
+constants — a guard on the declared-message surface, not a proof about every string the code emits.
+Each row's label and firing condition is **measured** by the suite; the message column is
+illustrative prose.
 
-| literal | module | fires when |
-|---|---|---|
-| `DECIDE_FOUR_EYES_MSG` (`"Four eyes: the approver cannot be the requester of the request they decide"`) | `logic/auth/publication.py` | `publication_request_decide` is called by the request's own requester — for an org `admin` **and** for a `sysadmin`, which has no exception. The row stays `pending` |
-| `DECIDE_REQUESTER_CAPACITY_MSG` (`"The requester no longer has permission to update this dataset, so the request cannot be decided"`) | `logic/auth/publication.py` | the requester's **current** capacity on the dataset's **current** owner is gone; checked before the sysadmin branch, so it has no sysadmin exception either |
-| `ALREADY_PUBLIC_MSG` (`"That dataset is already public"`) | `logic/auth/publication.py` | `publication_request_create` on an already-public dataset, and the sysadmin's `publication_publish` on one — the flip would be a no-op and the caller would only pile up `approved` rows |
-| `PUBLISH_VIA_FLOW_MSG` (`"Publication goes through the publication flow, not package_patch"`) | `auth.py` (the wall) | an **approver** — the org `admin` the flow authorizes — attempts the stock `package_update` route (`package_patch`, `package_update`, a public `package_create`, `bulk_update_public`). The message names the flow because the caller already holds the role |
-| `PUBLISH_DENIED_MSG` (`"Only an organization administrator can publish a dataset"`) | `auth.py` (the wall) | a caller **core admits** whose request the approver predicate rejects — in practice an organization `editor` — attempts the same stock route |
-| `PUBLISH_DENIED_MSG` (`"Only a sysadmin may publish a dataset directly"`) | `logic/auth/publication.py` | `publication_publish` is called by **any non-sysadmin**; the capacity predicate runs before the state one, so the same denial covers a non-sysadmin on an already-public dataset too (measured: `test_a_non_sysadmin_publishing_an_already_public_dataset_gets_the_sysadmin_denial`) |
+| label | module | message (the sentence is free) | fires when |
+|---|---|---|---|
+| `Four eyes` | `logic/auth/publication.py` | `"Four eyes: the approver cannot be the requester of the request they decide"` | `publication_request_decide` is called by the request's own requester who **has** the admin capacity the decision demands — for an org `admin` **and** for a `sysadmin`, which has no exception. The row stays `pending` |
+| `Requester capacity` | `logic/auth/publication.py` | `"Requester capacity: the requester can no longer update this dataset, so the request cannot be decided"` | the requester's **current** capacity on the dataset's **current** owner is gone; checked **before** four eyes and before the sysadmin branch, so it has no sysadmin exception either |
+| `Not an approver` | `logic/auth/publication.py` | `"Not an approver: only an organization administrator may decide a publication request"` | the caller is not an org `admin` (owning or parent) and not a `sysadmin`; for a non-sysadmin this branch runs **before** the four-eyes branch |
+| `Not a sysadmin` | `logic/auth/publication.py` | `"Not a sysadmin: only a sysadmin may publish a dataset directly"` | `publication_publish` is called by **any non-sysadmin**; the capacity predicate runs before the state one, so the same label covers a non-sysadmin on an already-public dataset too (measured: `test_a_non_sysadmin_publishing_an_already_public_dataset_gets_the_sysadmin_denial`) |
+| `Already public` | `logic/auth/publication.py` | `"Already public: that dataset is already public"` | `publication_request_create` on an already-public dataset, and the sysadmin's `publication_publish` on one — the flip would be a no-op and the caller would only pile up `approved` rows |
+| `Cannot request` | `logic/auth/publication.py` | `"Cannot request: only a user who can update this dataset may ask for it to be published"` | `publication_request_create` is called by a caller who cannot `update_dataset` in the dataset's owning organisation |
+| `Cannot cancel` | `logic/auth/publication.py` | `"Cannot cancel: only the requester or an organization administrator may cancel this request"` | `publication_request_cancel` is called by neither the requester nor an org `admin` |
+| `Publication flow` | `auth.py` (the wall) | `"Publication flow: publication goes through the publication flow, not package_patch"` | an **approver** — the org `admin` the flow authorizes — attempts the stock `package_update` route (`package_patch`, `package_update`, a public `package_create`, `bulk_update_public`) |
+| `Publish denied` | `auth.py` (the wall) | `"Publish denied: only an organization administrator can publish a dataset"` | a caller **core admits** whose request the approver predicate rejects — in practice an organization `editor` — attempts the same stock route |
 
-Two notes on scope, so the table is not read as more than it is. The **name `PUBLISH_DENIED_MSG`
-is not unique**: the two rows that carry it are different constants in different modules — the wall's
-in `auth.py` and the `publication_publish` action's in `logic/auth/publication.py` — and a consumer
-choosing between them must read the module as well as the name. Both are pinned, one per module. And
-on the `package_update` chain the wall's two literals reach only callers core admits: a `member`, a
-cross-organization `editor` and an anonymous caller are refused by core before the chain runs, so
-they keep core's own `403` text. `bulk_update_public` is the exception — its chain does not call
-`next_auth`, so it owns the refusal and answers every authenticated non-sysadmin that reaches it,
-core-admitted or not.
+The table went from **six rows to nine**. Three rows are new: **`Not an approver`** (the decide
+path's third refusal, which the earlier contract left unseparated), and **`Cannot request` /
+`Cannot cancel`** (the create and cancel refusals, which carried plain sentences with no label at
+all). The row the earlier contract carried for the `publication_publish` action's own
+`PUBLISH_DENIED_MSG` stays — but now it carries `Not a sysadmin`, so the **name collision is
+resolvable by label**: two constants called `PUBLISH_DENIED_MSG` in different modules (`auth.py` and
+`logic/auth/publication.py`) hold different texts, and a consumer that keyed on the name alone
+conflated the wall's role denial with the action's sysadmin denial. A consumer must read the label,
+not the module.
 
-**One refusal in this contract is not prose, and is already machine-readable.** A rejection with no
-comment is not a `403` at all: it is a `ValidationError` whose error dict is keyed on `comments` —
-`{"comments": ["Missing value: a rejection must carry a comment"]}` — so a consumer should present
-it as *"the motive is missing"* and keep the form open, not as *"the decision could not be
-registered"*. The two are different failures, and CKAN already distinguishes them without matching
-text. The **key** is pinned by test; the sentence inside it is not, because the key is the part a
-consumer branches on and the sentence is presentation.
+Two notes on scope, so the table is not read as more than it is. On the `package_update` chain the
+wall's two labels reach only callers core admits: a `member`, a cross-organization `editor` and an
+anonymous caller are refused by core before the chain runs, so they keep core's own `403` text.
+`bulk_update_public` is the exception — its chain does not call `next_auth`, so it owns the refusal
+and answers every authenticated non-sysadmin that reaches it, core-admitted or not. Every other
+`403` refusal the two modules **declare as a module-level message constant** is a row above; the
+invariant test keeps that true for that surface, and the `409` refusals are the separate class below.
+
+### Two classes of refusal: `403` carries a label, `409` carries a key
+
+Every refusal this contract documents arrives as one of exactly two API shapes, and a consumer must
+branch on a different part of each.
+
+- A **`403` authorization refusal** is `{"__type": "Authorization Error", "message": "Access
+  denied: <Label>: …"}`. The label is the interface (the section above); the sentence after the colon
+  is free prose. There is **no** field key, so the label is the only discriminator.
+- A **`409` validation refusal** is `{"__type": "Validation Error", "<field>": [ … ]}` with the
+  payload **keyed by field**, **no** `Access denied:` wrapper and **no** `message` key: CKAN's
+  `ckan/views/api.py` maps `ValidationError` to `409` and copies `error_dict` verbatim. The **key** is
+  the interface. Measured and executed on 2026-10-07 (`test_publication_actions.py` probe), there are
+  **three** keys:
+
+  | key | trigger | observed payload |
+  |---|---|---|
+  | `comments` | `publication_request_decide {approve: false}` with no non-blank `comments` | `{"comments": ["Missing value: a rejection must carry a comment"]}` |
+  | `request_id` | the request is not `pending`: `decide` → `"That request is no longer pending"` (decided or cancelled by someone else — the realistic queue race); `cancel` → `"Only a pending request can be cancelled"`; and a missing or blank `request_id` → `"Missing value"` | `{"request_id": ["That request is no longer pending"]}` |
+  | `approve` | `approve` is absent or not a boolean | `{"approve": ["Missing value: true or false"]}` |
+
+A consumer must read the **key** on a `409` and the **label** on a `403`. Presenting the `request_id`
+case as *"the decision could not be registered"* sends the user to retry something that can never
+succeed; the truth is *"this request was already decided"*, and the form should close and the queue
+refresh. The key is the part a consumer branches on; the sentence inside it is presentation and may be
+reworded.
 
 **The governance rule: the trigger to design a machine-readable token is the second consumer
-branch, not the second message.** Counted as messages there are already **six**; counted as places
+branch, not the second message.** Counted as labels there are already **nine**; counted as places
 where the consumer must **change behaviour** there is exactly **one** — four eyes, where the refusal
 means "you cannot decide your own request" and the portal must route elsewhere rather than merely
 display the text. One case is an exception, two cases are a shape; the day a second branch appears,
-the token is designed **before** the branch is wired, not after. Until then the six values stay
+the token is designed **before** the branch is wired, not after. Until then the nine labels stay
 pinned text, and this file stays the single point the consumer's constant points at.
+
+**The precedence of the three decide-path labels is measured, not asserted.** The decide path alone
+carries `Requester capacity`, `Not an approver` and `Four eyes`, all `403`. They are ordered: the
+requester's **current capacity** is checked first, then (for a non-sysadmin) the approver capacity,
+and only then four eyes. `Four eyes` therefore appears only for a requester who **has** the admin
+capacity the decision demands; a requester who lost it answers `Requester capacity`
+(`test_the_decide_path_checks_capacity_before_four_eyes`), and a non-approver requester answers
+`Not an approver` (`test_a_non_approver_requester_gets_not_an_approver_not_four_eyes`).
 
 **Standing note on the price of that future token.** The portal already reads CKAN's `__type` and
 discriminates with it elsewhere — **relayed**: it is the consuming repository, not this one — so an
 own error type would cost less on the consumer side than it looks, because part of the reader for it
 already exists. That changes the **price** of the future decision; it does not make the decision
-today. The contract above stands: six pinned literals, one single pointer, and the second branch as
+today. The contract above stands: nine pinned labels, one single pointer, and the second branch as
 the trigger.
 
 ### Named bypasses

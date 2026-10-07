@@ -94,8 +94,20 @@ import ckan.authz as authz
 import ckan.model as model
 import ckan.plugins.toolkit as toolkit
 
+#: The refusal **labels** are the frozen interface a consumer matches on:
+#: every message below reads ``<label>: <sentence>``, the label is the part
+#: that must not change, and the sentence after it is free prose. ``Publish
+#: denied`` belongs to the wall's own ``PUBLISH_DENIED_MSG`` and is deliberately
+#: distinct from the ``publication_publish`` action's ``Not a sysadmin``, so the
+#: two same-named constants in different modules stay separable by label.
+PUBLISH_DENIED_LABEL = "Publish denied"
+PUBLICATION_FLOW_LABEL = "Publication flow"
+
 PUBLISH_DENIED_MSG = toolkit._(
-    'Only an organization administrator can publish a dataset'
+    "%s: %s" % (
+        PUBLISH_DENIED_LABEL,
+        "only an organization administrator can publish a dataset",
+    )
 )
 
 #: The message an *approver* gets from the wall. The caller who holds the
@@ -106,7 +118,10 @@ PUBLISH_DENIED_MSG = toolkit._(
 #: messages to be distinguishable, and a consumer that reads only one of them
 #: must not conflate the two callers.
 PUBLISH_VIA_FLOW_MSG = toolkit._(
-    'Publication goes through the publication flow, not package_patch'
+    "%s: %s" % (
+        PUBLICATION_FLOW_LABEL,
+        "publication goes through the publication flow, not package_patch",
+    )
 )
 
 #: Exactly the strings `ckan.logic.validators.boolean_validator` reads as `True`.
