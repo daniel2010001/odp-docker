@@ -18,9 +18,11 @@ import pytest
 
 import ckan.authz
 import ckan.logic as logic
+import ckan.model
 from ckan.tests import factories, helpers
 
 from ckanext.umss import auth as umss_auth
+from ckanext.umss import model as umss_model
 
 
 pytestmark = [
@@ -106,18 +108,51 @@ def scene():
     }
 
 
+@pytest.fixture
+def store(clean_db, migrate_db_for):
+    """The store table, built by this extension's own migration.
+
+    The recorded-door assertions need `publication_requests`; `clean_db` does
+    not build extension tables, so the migration has to run. `clean_db` is an
+    explicit dependency of this fixture, not an accident: it must wipe every
+    row before the table is built and before any factory in the test runs.
+    """
+    migrate_db_for("umss")
+
+
+def publication_rows(dataset_id):
+    """The `publication_requests` rows for a dataset."""
+    ckan.model.Session.commit()
+    ckan.model.Session.expire_all()
+    return (
+        ckan.model.Session.query(umss_model.PublicationRequest)
+        .filter(umss_model.PublicationRequest.dataset_id == dataset_id)
+        .all()
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1.2.1 — the update path: an editor must not publish, and must not change state
 # ---------------------------------------------------------------------------
 
 
-def test_the_guard_is_registered_for_both_action_names():
+def test_the_guard_is_registered_for_every_guarded_action_name():
     """The plugin must own the chained functions, not merely define them."""
     assert umss_auth.package_update.chained_auth_function is True
     assert umss_auth.package_create.chained_auth_function is True
-    for action in ("package_update", "package_create"):
+    assert umss_auth.bulk_update_public.chained_auth_function is True
+    for action in ("package_update", "package_create", "bulk_update_public"):
         registered = ckan.authz._AuthFunctions.get(action)
         assert getattr(registered, "chained_auth_function", False) is True, action
+
+
+def test_the_guard_does_not_set_auth_sysadmins_check():
+    """The declared sysadmin bypass is load-bearing: without the flag,
+    `is_authorized` answers success for a sysadmin *before* any chained rule
+    runs, so the guard must not set it (`ckan/authz.py:224-228`)."""
+    for action in ("package_update", "package_create", "bulk_update_public"):
+        registered = ckan.authz._AuthFunctions.get(action)
+        assert getattr(registered, "auth_sysadmins_check", False) is False, action
 
 
 def test_editor_package_patch_private_false_is_refused(scene):
@@ -146,18 +181,53 @@ def test_editor_full_package_update_flipping_private_is_refused(scene):
     assert stored(scene["dataset"]["id"])["private"] is True
 
 
-def test_sysadmin_publishes(scene):
-    """CKAN short-circuits sysadmins before any auth function; the guard must
-    not disable that by flagging itself `auth_sysadmins_check`."""
+def test_sysadmin_stock_package_patch_still_publishes_without_a_row(scene, store):
+    """A3.3: the declared bypass survives. CKAN short-circuits sysadmins before
+    any auth function, and the stock `package_patch` route stays open to them as
+    the emergency escape hatch — unrecorded, by design."""
     call_as(factories.Sysadmin(), "package_patch",
             id=scene["dataset"]["id"], private=False)
     assert stored(scene["dataset"]["id"])["private"] is False
+    assert publication_rows(scene["dataset"]["id"]) == []
 
 
-def test_org_admin_publishes(scene):
-    call_as(scene["admin"], "package_patch",
-            id=scene["dataset"]["id"], private=False)
+def test_sysadmin_recorded_door_writes_its_row(scene, store):
+    """A3.3: the sysadmin's recorded door, `publication_publish`, publishes and
+    writes the approved row in the same act — the contrast with the unrecorded
+    stock bypass above."""
+    sysadmin = factories.Sysadmin()
+    call_as(sysadmin, "publication_publish", dataset_id=scene["dataset"]["id"])
     assert stored(scene["dataset"]["id"])["private"] is False
+    rows = publication_rows(scene["dataset"]["id"])
+    assert len(rows) == 1
+    assert rows[0].status == umss_model.APPROVED
+    assert rows[0].approved_by == sysadmin["id"]
+
+
+def test_org_admin_package_patch_private_false_is_refused(scene):
+    """A3.1: the reversal of measured P6 (`apply-progress.md:282`).
+
+    The same call answered `200` and stored `private: false` before this change.
+    The admin is the *approver* the door's authorization names, but the door is
+    the publication flow, so the wall refuses with its own message — distinct
+    from the one a non-administrator gets.
+    """
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(scene["admin"], "package_patch",
+                id=scene["dataset"]["id"], private=False)
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+    assert umss_auth.PUBLISH_DENIED_MSG not in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+def test_org_admin_package_patch_state_draft_is_refused(scene):
+    """A3.1: measured P4a, now for the approver too — the capacity exception is
+    gone, so a `state` change is refused with the flow message."""
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(scene["admin"], "package_patch",
+                id=scene["dataset"]["id"], state="draft")
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["state"] == "active"
 
 
 def test_unrecognized_private_value_does_not_publish(scene):
@@ -180,6 +250,52 @@ def test_unrecognized_private_value_does_not_publish(scene):
         assert stored(scene["dataset"]["id"])["private"] is True
 
 
+@pytest.mark.parametrize("value, tag", [
+    (0, "int-zero"),
+    (0.0, "float-zero"),
+    ([], "empty-list"),
+    ({}, "empty-dict"),
+])
+def test_editor_package_patch_private_never_defers_to_core(scene, value, tag):
+    """`boolean_validator` is total and never raises: it coerces a `bool`/`int`
+    (`private = 0` -> `False` = **public**) and returns `False` for everything
+    else. `_as_bool` must mirror that, so no value may defer to core's
+    validation — deferring here is deferring to a publication. Measured before
+    the fix (probe P4f): `private = 0` answered `200` and stored a public
+    dataset, because the guard read the non-`str` value as `None` and deferred."""
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(scene["editor"], "package_patch",
+                id=scene["dataset"]["id"], private=value)
+    assert umss_auth.PUBLISH_DENIED_MSG in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+@pytest.mark.parametrize("value", [0, 0.0, [], {}])
+def test_editor_full_package_update_private_never_defers_to_core(scene, value):
+    payload = dict(stored(scene["dataset"]["id"]))
+    payload.pop("tracking_summary", None)
+    payload["private"] = value
+    with pytest.raises(logic.NotAuthorized):
+        call_as(scene["editor"], "package_update", **payload)
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+@pytest.mark.parametrize("value, tag", [
+    (0, "int-zero"),
+    (0.0, "float-zero"),
+    ([], "empty-list"),
+    ({}, "empty-dict"),
+])
+def test_editor_package_create_private_never_defers_to_core(scene, value, tag):
+    name = "probe-editor-create-%s" % tag
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(scene["editor"], "package_create",
+                name=name, owner_org=scene["org"]["id"], private=value)
+    assert umss_auth.PUBLISH_DENIED_MSG in str(excinfo.value)
+    with pytest.raises(logic.NotFound):
+        stored(name)
+
+
 def test_unresolvable_id_defers_to_core(scene):
     """Core raises its own `NotFound`; the guard must not convert it to a `403`."""
     with pytest.raises(logic.NotFound):
@@ -188,12 +304,67 @@ def test_unresolvable_id_defers_to_core(scene):
 
 
 def test_private_false_on_an_already_public_dataset_requests_no_transition(scene):
-    """No diff is requested, so the guard has nothing to refuse."""
-    call_as(scene["admin"], "package_patch",
-            id=scene["dataset"]["id"], private=False)
-    call_as(scene["editor"], "package_patch",
-            id=scene["dataset"]["id"], private=False)
-    assert stored(scene["dataset"]["id"])["private"] is False
+    """No diff is requested, so the guard has nothing to refuse — for every
+    caller, approver or not. Built public through a factory, not through the
+    stock route the wall now closes."""
+    public = factories.Dataset(owner_org=scene["org"]["id"], private=False)
+    call_as(scene["admin"], "package_patch", id=public["id"], private=False)
+    call_as(scene["editor"], "package_patch", id=public["id"], private=False)
+    assert stored(public["id"])["private"] is False
+
+
+def test_the_two_refusal_messages_are_distinguishable(scene):
+    """A3.3: the wall carries two messages, and they are not interchangeable.
+    The non-administrator's names the required role; the administrator's names
+    the flow and the action it is not."""
+    with pytest.raises(logic.NotAuthorized) as editor_exc:
+        call_as(scene["editor"], "package_patch",
+                id=scene["dataset"]["id"], private=False)
+    with pytest.raises(logic.NotAuthorized) as admin_exc:
+        call_as(scene["admin"], "package_patch",
+                id=scene["dataset"]["id"], private=False)
+
+    assert umss_auth.PUBLISH_DENIED_MSG in str(editor_exc.value)
+    assert umss_auth.PUBLISH_DENIED_MSG not in str(admin_exc.value)
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(admin_exc.value)
+    assert umss_auth.PUBLISH_DENIED_MSG != umss_auth.PUBLISH_VIA_FLOW_MSG
+    # The administrator's message states the flow and the action it is not.
+    assert "publication flow" in umss_auth.PUBLISH_VIA_FLOW_MSG
+    assert "package_patch" in umss_auth.PUBLISH_VIA_FLOW_MSG
+
+
+def test_the_wall_refusal_literals_are_the_interface_values():
+    """The wall's two refusal messages are interface values a **consumer**
+    matches on: the portal reads them from a single constant that points at
+    `PUBLICATION-ACTIONS.md`, and CKAN gives no machine-readable code — an
+    authorization failure is only `{"__type": "Authorization Error",
+    "message": ...}` — so the text *is* the interface.
+
+    The two literals are not equally guarded elsewhere, so this pin's marginal
+    value differs by value. `PUBLISH_VIA_FLOW_MSG` was already constrained in
+    `test_the_two_refusal_messages_are_distinguishable` by the **fragments**
+    `"publication flow"` and `"package_patch"`; a reword that keeps those two
+    fragments passes there, and that is exactly the reword the consumer cannot
+    absorb, because it matches the whole string. `PUBLISH_DENIED_MSG` was
+    referenced elsewhere only through the Python constant, so a typo in its
+    value would pass every other test in this file. This test upgrades the first
+    to an exact value and gives the second its only exact value.
+
+    A **pin, not a RED**: it passes against the constants as first written. It
+    freezes the *value*, not the wording — the wording is not under review
+    here. Rewording either message fails this test, and that failure is the
+    signal that a consumer constant pointing at the contract file has gone
+    stale, which is the whole reason the value is pinned rather than the
+    wording trusted.
+    """
+    assert (
+        umss_auth.PUBLISH_DENIED_MSG
+        == "Only an organization administrator can publish a dataset"
+    )
+    assert (
+        umss_auth.PUBLISH_VIA_FLOW_MSG
+        == "Publication goes through the publication flow, not package_patch"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -223,11 +394,29 @@ def test_omitting_private_resolves_to_the_public_column_default(scene):
     The same payload the editor was refused for, sent by a caller who *may*
     publish, stores a public dataset: `private` is absent from the requested
     dict, so `ignore_missing` drops it and the column default
-    (`ckan/model/package.py:75`, `default=False`) applies.
+    (`ckan/model/package.py:75`, `default=False`) applies. After A3 the caller
+    who may publish is a `sysadmin`; the factory below is the sysadmin's own
+    write and is not gated by the wall.
     """
     created = factories.Dataset(owner_org=scene["org"]["id"])
     assert created["private"] is False
     assert stored(created["id"])["private"] is False
+
+
+def test_org_admin_package_create_public_is_refused(scene):
+    """A3.1/D6.2: creation is private for **everyone**. An omitted `private` is
+    the same publish attempt as `false`, and even the approver is refused — the
+    administrator publishes afterwards through the action, not through create."""
+    for name, payload in (
+        ("probe-admin-create-false", {"private": False}),
+        ("probe-admin-create-omitted", {}),
+    ):
+        data = dict(payload, name=name, owner_org=scene["org"]["id"])
+        with pytest.raises(logic.NotAuthorized) as excinfo:
+            call_as(scene["admin"], "package_create", **data)
+        assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+        with pytest.raises(logic.NotFound):
+            stored(name)
 
 
 def test_editor_package_create_with_the_wizards_payload_is_allowed(scene):
@@ -307,6 +496,94 @@ def test_resource_create_is_allowed(scene):
     assert created["package_id"] == scene["dataset"]["id"]
     assert len(stored(scene["dataset"]["id"])["resources"]) == 1
     assert stored(scene["dataset"]["id"])["private"] is True
+
+
+# ---------------------------------------------------------------------------
+# D6.3 — the bulk door: refused on its own auth, before the package_patch loop
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_update_public_is_refused_by_the_chained_rule(scene):
+    """A3.1/D6.3: the refusal is this plugin's, on `bulk_update_public`'s own auth.
+
+    Measured on the running CKAN 2.12.0: `_bulk_update_dataset`
+    (`ckan/logic/action/update.py:1200-1216`) loops `package_patch`, so the
+    action **does** reach `package_update` — the earlier claim that it did not
+    came from a stale checkout. The chain here is on the action's own auth and
+    refuses before the body runs, so that loop is never entered.
+
+    Core's own auth for the action (`ckan/logic/auth/update.py:262`) checks only
+    `has_user_permission_for_group_or_org(org_id, user, 'update')`: an `editor`
+    fails that (the `editor` role carries `update_dataset`, not `update`), an
+    `admin` passes it. The refusal must therefore be **ours** in both cases —
+    the editor's message proves core did not answer it, because core answers
+    `{'success': False}` with no message.
+    """
+    with pytest.raises(logic.NotAuthorized) as editor_exc:
+        call_as(scene["editor"], "bulk_update_public",
+                org_id=scene["org"]["id"], datasets=[scene["dataset"]["id"]])
+    assert umss_auth.PUBLISH_DENIED_MSG in str(editor_exc.value)
+
+    with pytest.raises(logic.NotAuthorized) as admin_exc:
+        call_as(scene["admin"], "bulk_update_public",
+                org_id=scene["org"]["id"], datasets=[scene["dataset"]["id"]])
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(admin_exc.value)
+
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+# ---------------------------------------------------------------------------
+# The bulk-update inventory, executed rather than source-read
+# ---------------------------------------------------------------------------
+
+
+def test_editor_bulk_update_delete_is_refused(scene):
+    """A2 named the bulk-update delete bypass; the editor's outcome is refusal,
+    but **not** by the wall. Measured: core's `bulk_update_delete` auth requires
+    `has_user_permission_for_group_or_org(org_id, user, 'update')`, which the
+    `editor` role does not carry (`ckan/authz.py:360`), so core denies before
+    `_bulk_update_dataset` runs and the wall's chain is never reached. The state
+    stays `active` either way."""
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(scene["editor"], "bulk_update_delete",
+                org_id=scene["org"]["id"], datasets=[scene["dataset"]["id"]])
+    assert umss_auth.PUBLISH_DENIED_MSG not in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["state"] == "active"
+
+
+def test_admin_bulk_update_delete_is_refused_by_the_wall(scene):
+    """The caller A2's bypass actually named is the admin: the `admin` role
+    satisfies every permission, so it passes core's `bulk_update_delete` auth,
+    and the wall then refuses the `state` change the inner `package_patch`
+    carries, with the flow message."""
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(scene["admin"], "bulk_update_delete",
+                org_id=scene["org"]["id"], datasets=[scene["dataset"]["id"]])
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["state"] == "active"
+
+
+def test_admin_bulk_update_private_is_still_allowed(scene):
+    """Narrowing visibility is not a publication: the admin passes core's
+    `bulk_update_private` auth, and the wall's `package_update` chain permits the
+    `private: True` the inner `package_patch` carries."""
+    public = factories.Dataset(owner_org=scene["org"]["id"], private=False)
+    call_as(scene["admin"], "bulk_update_private",
+            org_id=scene["org"]["id"], datasets=[public["id"]])
+    assert stored(public["id"])["private"] is True
+
+
+def test_editor_bulk_update_private_is_refused_by_core_not_the_wall(scene):
+    """The same outer-auth asymmetry as delete: an `editor` lacks the `update`
+    permission `bulk_update_private` requires, so core refuses before the body
+    and the wall never sees it. The editor is not the caller the inventory's
+    'still allowed' reading holds for; the admin is."""
+    public = factories.Dataset(owner_org=scene["org"]["id"], private=False)
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(scene["editor"], "bulk_update_private",
+                org_id=scene["org"]["id"], datasets=[public["id"]])
+    assert umss_auth.PUBLISH_DENIED_MSG not in str(excinfo.value)
+    assert stored(public["id"])["private"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -398,11 +675,16 @@ def test_an_update_without_resources_keeps_them_and_hands_the_rule_none(
     assert [resource["name"] for resource in after["resources"]] == ["one", "two"]
 
 
-def test_admin_of_a_parent_org_publishes_a_child_org_dataset():
+def test_admin_of_a_parent_org_is_refused_and_gets_the_flow_message():
     """The cascade in `Approver Capacity` is measured (design P10), so it is a
     test rather than an assumption: `has_user_permission_for_group_or_org` walks
     `get_parent_group_hierarchy` for the capacities in
-    `ckan.auth.roles_that_cascade_to_sub_groups` (`admin`)."""
+    `ckan.auth.roles_that_cascade_to_sub_groups` (`admin`).
+
+    Under the wall the cascade no longer grants a publish; it grants the
+    approver identity, so the parent admin is refused with the administrator's
+    flow message rather than the non-administrator's role message.
+    """
     parent = factories.Organization()
     child = factories.Organization()
     admin = factories.User()
@@ -414,5 +696,7 @@ def test_admin_of_a_parent_org_publishes_a_child_org_dataset():
                         object_type="group", capacity="parent")
     dataset = factories.Dataset(owner_org=child["id"], private=True)
 
-    call_as(admin, "package_patch", id=dataset["id"], private=False)
-    assert stored(dataset["id"])["private"] is False
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(admin, "package_patch", id=dataset["id"], private=False)
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+    assert stored(dataset["id"])["private"] is True

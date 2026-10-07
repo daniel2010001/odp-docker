@@ -254,6 +254,30 @@ def test_decide_rejecting_without_comments_is_a_validation_error(scene, store):
     assert the_row(scene["dataset"]["id"]).status == "pending"
 
 
+def test_the_missing_comment_rejection_is_keyed_on_the_comments_field(scene, store):
+    """A rejection with no comment is the one refusal a consumer can read
+    **without matching prose**: it is a `ValidationError` whose error dict is
+    keyed on `comments`. This pins the **key**, not the sentence inside it — the
+    key is what a consumer branches on ("the motive is missing"), while the
+    sentence is presentation and may be reworded. Pinning the key keeps that
+    branch honest if the message changes; the sibling tests assert the message
+    only as a substring of the exception, which a reword would not fail.
+
+    A **pin, not a RED**: it passes against the code as first written.
+    """
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.ValidationError) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=False,
+        )
+
+    assert list(excinfo.value.error_dict) == ["comments"]
+
+
 def test_decide_rejecting_with_blank_comments_is_a_validation_error(scene, store):
     created = request_for(scene["editor"], scene["dataset"]["id"])
 
@@ -807,6 +831,67 @@ def test_the_motive_tokens_are_the_interface_values():
     assert umss_model.MOTIVE_DATASET_DELETED == "dataset_deleted"
     assert (
         umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH == "published_by_another_path"
+    )
+
+
+def test_the_publication_refusal_literals_are_the_interface_values():
+    """The publication actions' three refusal messages are interface values a
+    **consumer** matches on: the portal reads them from a single constant that
+    points at `PUBLICATION-ACTIONS.md`, and CKAN gives no machine-readable code
+    — an authorization failure is only `{"__type": "Authorization Error",
+    "message": ...}` — so the text *is* the interface.
+
+    The three literals are not equally guarded elsewhere, so this pin's
+    marginal value differs by value. `DECIDE_FOUR_EYES_MSG` was already
+    constrained by the **fragment** `"four eyes"` in
+    `test_the_requester_cannot_decide_their_own_request` and
+    `test_a_sysadmin_cannot_decide_their_own_request`; a reword that keeps the
+    fragment passes there, and that is exactly the reword the consumer cannot
+    absorb, because it matches the whole string.
+    `DECIDE_REQUESTER_CAPACITY_MSG` and `ALREADY_PUBLIC_MSG` were referenced
+    elsewhere only through the Python constants, so a typo in their values would
+    pass every other test in this file. This test upgrades the first to an exact
+    value and gives the other two their only exact value.
+
+    A **pin, not a RED**: it passes against the constants as first written. It
+    freezes the *value*, not the wording — the wording is not under review
+    here. Rewording any of the three fails this test, and that failure is the
+    signal that a consumer constant pointing at the contract file has gone
+    stale, which is the whole reason the value is pinned rather than the
+    wording trusted.
+
+    The module's own `PUBLISH_DENIED_MSG` — the action's sysadmin denial, a
+    different literal from the wall's constant of the same name — is pinned by
+    `test_the_action_denial_literal_is_pinned` just below, so the name collision
+    is pinned on both sides rather than explained in prose only.
+    """
+    assert (
+        auth_publication.DECIDE_FOUR_EYES_MSG
+        == "Four eyes: the approver cannot be the requester of the request they decide"
+    )
+    assert (
+        auth_publication.DECIDE_REQUESTER_CAPACITY_MSG
+        == "The requester no longer has permission to update this dataset, so "
+        "the request cannot be decided"
+    )
+    assert auth_publication.ALREADY_PUBLIC_MSG == "That dataset is already public"
+
+
+def test_the_action_denial_literal_is_pinned():
+    """The sixth consumer-visible refusal literal: this module's **own**
+    `PUBLISH_DENIED_MSG`, the `publication_publish` action's sysadmin denial.
+    It shares its **name** with the wall's constant in `ckanext.umss.auth`
+    (`test_auth.py` pins that one) but not its value, and the two are different
+    refusals: the wall's names the role for a stock `package_patch`, this one
+    names the sysadmin requirement for the action. Pinning both sides is what
+    keeps a consumer from keying on the name alone and conflating them.
+
+    A **pin, not a RED**: it passes against the constant as first written, and
+    it freezes the value rather than reviewing the wording.
+    """
+    assert (
+        auth_publication.PUBLISH_DENIED_MSG
+        == "Only a sysadmin may publish a dataset directly"
     )
 
 
