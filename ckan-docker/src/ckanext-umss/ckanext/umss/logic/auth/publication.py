@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ckan.authz as ckan_authz
 import ckan.model as model
+import ckan.plugins.toolkit as toolkit
 
 from ckanext.umss import model as umss_model
 
@@ -33,6 +34,7 @@ __all__ = [
     "REQUEST_DENIED_MSG",
     "CANCEL_DENIED_MSG",
     "DECIDE_DENIED_MSG",
+    "DECIDE_FOUR_EYES_MSG",
     "PUBLISH_DENIED_MSG",
 ]
 
@@ -50,8 +52,11 @@ CANCEL_DENIED_MSG = (
 DECIDE_DENIED_MSG = (
     "Only an organization administrator may decide a publication request"
 )
+DECIDE_FOUR_EYES_MSG = (
+    "Four eyes: the approver cannot be the requester of the request they decide"
+)
 PUBLISH_DENIED_MSG = (
-    "Only an organization administrator may publish a dataset directly"
+    "Only a sysadmin may publish a dataset directly"
 )
 ALREADY_PUBLIC_MSG = "That dataset is already public"
 
@@ -111,22 +116,56 @@ def publication_request_cancel(context, data_dict):
     return {"success": False, "msg": CANCEL_DENIED_MSG}
 
 
+@toolkit.auth_sysadmins_check
 def publication_request_decide(context, data_dict):
-    """D4: an org `admin` (and a sysadmin, through the stock short-circuit)."""
+    """D4, plus the governance amendment's four eyes.
+
+    An org `admin` decides for someone else. Four eyes: the requester cannot
+    decide their own request, and sysadmins have no exception — the sanctioned
+    path for a sysadmin who requested is `publication_publish`.
+
+    `auth_sysadmins_check` is load-bearing, not decoration. Without it CKAN
+    short-circuits every sysadmin to success *before* this function runs
+    (`ckan/authz.py:224-228`), leaving the rule written, green and hollow for
+    exactly the caller it does not exempt. With it, the function runs for a
+    sysadmin too, so it must answer for that caller explicitly.
+    """
     row = _request_row(data_dict.get("request_id"))
     if row is None:
         return {"success": True}
+
+    caller = _user_id(context)
+    is_requester = bool(row.requested_by) and row.requested_by == caller
+
+    if ckan_authz.is_sysadmin(context.get("user")):
+        if is_requester:
+            return {"success": False, "msg": DECIDE_FOUR_EYES_MSG}
+        return {"success": True}
+
     if not _allowed(context, _org_id_of_dataset(row.dataset_id), ADMIN_PERMISSION):
         return {"success": False, "msg": DECIDE_DENIED_MSG}
+    if is_requester:
+        return {"success": False, "msg": DECIDE_FOUR_EYES_MSG}
     return {"success": True}
 
 
 def publication_publish(context, data_dict):
-    """D4: an org `admin` publishing on their own authority."""
+    """The governance amendment: a sysadmin publishing on their own authority.
+
+    The organization-admin direct path through this action is closed. The org
+    admin keeps the stock `package_patch {private: false}` route, which the wall
+    in `ckanext.umss.auth` owns; this action is a sysadmin's.
+
+    The dataset is resolved first, because contract rule 7 requires an
+    unresolvable `dataset_id` to answer `NotFound`, not `403`: the auth answers
+    `success` for an unknown id and the action raises `NotFound`
+    (R1-ORPHAN-ROW). Only the capacity predicate below narrows the caller to a
+    sysadmin.
+    """
     dataset = model.Package.get(data_dict.get("dataset_id") or "")
     if dataset is None:
         return {"success": True}
-    if not _allowed(context, dataset.owner_org, ADMIN_PERMISSION):
+    if not ckan_authz.is_sysadmin(context.get("user")):
         return {"success": False, "msg": PUBLISH_DENIED_MSG}
     return {"success": True}
 

@@ -172,6 +172,13 @@ def publication_request_decide(context, data_dict):
             {"request_id": ["That request is no longer pending"]}
         )
 
+    if not approve:
+        comments = data_dict.get("comments")
+        if not isinstance(comments, str) or not comments.strip():
+            raise toolkit.ValidationError(
+                {"comments": ["Missing value: a rejection must carry a comment"]}
+            )
+
     if data_dict.get("comments"):
         row.comments = data_dict["comments"]
     row.approved_by = _caller_id(context)
@@ -187,11 +194,11 @@ def publication_request_decide(context, data_dict):
 
 
 def publication_publish(context, data_dict):
-    """D4's admin path: one row, born already decided and consumed.
+    """The sysadmin's recorded path: one row, born already decided and consumed.
 
     A pending request for the same dataset is **annulled**, not cancelled: the
-    requester did not withdraw it, a direct admin action made it moot — which is
-    what D2 added `annulled` for.
+    requester did not withdraw it, a direct action by the sysadmin made it moot —
+    which is what D2 added `annulled` for.
     """
     toolkit.check_access("publication_publish", context, data_dict)
     dataset_id = _required(data_dict, "dataset_id")

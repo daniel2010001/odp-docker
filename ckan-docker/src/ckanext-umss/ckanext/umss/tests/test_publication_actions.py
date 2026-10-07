@@ -230,6 +230,54 @@ def test_decide_rejecting_leaves_the_dataset_private(scene, store):
     assert stored(scene["dataset"]["id"])["private"] is True
 
 
+def test_decide_rejecting_without_comments_is_a_validation_error(scene, store):
+    """The governance amendment: a rejection must carry a comment, and the
+    failure is a `ValidationError` — the spec separates validation from the
+    authorization refusal."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.ValidationError) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=False,
+        )
+
+    assert "comments" in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_decide_rejecting_with_blank_comments_is_a_validation_error(scene, store):
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.ValidationError):
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=False,
+            comments="   ",
+        )
+
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_decide_approving_without_comments_still_works(scene, store):
+    """`comments` is optional when approving; only the rejection requires it."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    decided = call_as(
+        scene["admin"],
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+
+
 def test_decide_approving_records_the_decision_and_flips_in_the_same_call(scene, store):
     created = call_as(
         scene["editor"], "publication_request_create", dataset_id=scene["dataset"]["id"]
@@ -249,9 +297,10 @@ def test_decide_approving_records_the_decision_and_flips_in_the_same_call(scene,
 
 
 def test_publish_writes_and_consumes_the_row_in_the_act(scene, store):
-    """D4's admin path: no queue, one row that is born already decided."""
+    """D4's sysadmin path: no queue, one row that is born already decided."""
+    sysadmin = factories.Sysadmin()
     published = call_as(
-        scene["admin"],
+        sysadmin,
         "publication_publish",
         dataset_id=scene["dataset"]["id"],
         comments="lo publico yo",
@@ -260,8 +309,8 @@ def test_publish_writes_and_consumes_the_row_in_the_act(scene, store):
     row = the_row(scene["dataset"]["id"])
     assert published["status"] == "approved"
     assert row.status == "approved"
-    assert row.requested_by == scene["admin"]["id"]
-    assert row.approved_by == scene["admin"]["id"]
+    assert row.requested_by == sysadmin["id"]
+    assert row.approved_by == sysadmin["id"]
     assert row.decided_at is not None
     assert row.consumed_at is not None
     assert stored(scene["dataset"]["id"])["private"] is False
@@ -269,10 +318,14 @@ def test_publish_writes_and_consumes_the_row_in_the_act(scene, store):
 
 def test_publish_annuls_a_pending_request_instead_of_leaving_it_open(scene, store):
     """`annulled` is what D2 added it for, and it is not `cancelled`: the
-    requester did not withdraw it — a direct admin action made it moot."""
+    requester did not withdraw it — a direct sysadmin action made it moot."""
     request_for(scene["editor"], scene["dataset"]["id"])
 
-    call_as(scene["admin"], "publication_publish", dataset_id=scene["dataset"]["id"])
+    call_as(
+        factories.Sysadmin(),
+        "publication_publish",
+        dataset_id=scene["dataset"]["id"],
+    )
 
     statuses = sorted(r.status for r in rows() if r.dataset_id == scene["dataset"]["id"])
     assert statuses == ["annulled", "approved"]
@@ -288,6 +341,7 @@ def test_list_filters_by_status(scene, store):
         "publication_request_decide",
         request_id=rejected["id"],
         approve=False,
+        comments="no",
     )
 
     every = call_as(scene["admin"], "publication_request_list")
@@ -335,6 +389,43 @@ def test_an_editor_cannot_publish(scene, store):
     assert stored(scene["dataset"]["id"])["private"] is True
 
 
+def test_an_org_admin_cannot_publish_directly(scene, store):
+    """The governance amendment. `publication_publish` is sysadmin-only; the
+    org admin keeps only the stock `package_patch {private: false}` route, which
+    the wall (`ckanext.umss.auth`) owns, not this action."""
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_publish",
+            dataset_id=scene["dataset"]["id"],
+        )
+
+    assert "sysadmin" in str(excinfo.value).lower()
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert rows() == []
+
+
+def test_a_sysadmin_can_publish(scene, store):
+    """Positive control, not a discriminating test: this passes under the old
+    org-admin-grants-publish code too, because CKAN short-circuits a sysadmin to
+    success. It guards the amendment against over-narrowing — the action must
+    not be closed to a sysadmin — but the change itself is proven by
+    `test_an_org_admin_cannot_publish_directly`."""
+    sysadmin = factories.Sysadmin()
+    published = call_as(
+        sysadmin,
+        "publication_publish",
+        dataset_id=scene["dataset"]["id"],
+        comments="por el sysadmin",
+    )
+
+    row = the_row(scene["dataset"]["id"])
+    assert published["status"] == "approved"
+    assert row.requested_by == sysadmin["id"]
+    assert row.approved_by == sysadmin["id"]
+    assert stored(scene["dataset"]["id"])["private"] is False
+
+
 def test_a_member_cannot_create(scene, store):
     """D4 asks for a caller who can `update_dataset`; a member cannot."""
     refused(scene["member"], "publication_request_create", dataset_id=scene["dataset"]["id"])
@@ -357,17 +448,23 @@ def test_the_requester_can_cancel_their_own_request(scene, store):
     assert cancelled["status"] == "cancelled"
 
 
-def test_an_org_admin_can_decide_and_publish(scene, store):
-    """The two authorities D4 grants an org admin: deciding for someone else,
-    and publishing on their own (the direct path, `RF-15` step 5)."""
+def test_an_org_admin_can_decide_but_not_publish(scene, store):
+    """The governance amendment narrows D4: an org admin still decides for
+    someone else, but `publication_publish` is no longer an org-admin authority.
+    The direct publish is a sysadmin's (`test_a_sysadmin_can_publish`)."""
     created = request_for(scene["editor"], scene["dataset"]["id"])
     decided = call_as(
         scene["admin"], "publication_request_decide", request_id=created["id"], approve=True
     )
     assert decided["status"] == "approved"
 
-    call_as(scene["admin"], "publication_publish", dataset_id=scene["second_dataset"]["id"])
-    assert stored(scene["second_dataset"]["id"])["private"] is False
+    with pytest.raises(toolkit.NotAuthorized):
+        call_as(
+            scene["admin"],
+            "publication_publish",
+            dataset_id=scene["second_dataset"]["id"],
+        )
+    assert stored(scene["second_dataset"]["id"])["private"] is True
 
 
 def test_an_admin_cannot_publish_in_an_organization_they_do_not_administer(scene, store):
@@ -413,6 +510,63 @@ def test_the_child_orgs_own_admin_can_decide(suborg_scene, store):
         approve=True,
     )
     assert decided["status"] == "approved"
+
+
+def test_the_requester_cannot_decide_their_own_request(scene, store):
+    """Four eyes: an org admin who opened the request cannot approve it, and the
+    refusal is not a silent no-op — the row stays `pending`."""
+    created = request_for(scene["admin"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert "four eyes" in str(excinfo.value).lower()
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_a_sysadmin_can_decide_someone_elses_request(scene, store):
+    """Positive control, not a discriminating test: this passes under the old
+    code too, through the stock sysadmin short-circuit. With
+    `auth_sysadmins_check` now forcing the function to run for a sysadmin, it
+    guards against the function over-narrowing; the flag's real proof is
+    `test_a_sysadmin_cannot_decide_their_own_request`."""
+    sysadmin = factories.Sysadmin()
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    decided = call_as(
+        sysadmin,
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+    assert stored(scene["dataset"]["id"])["private"] is False
+
+
+def test_a_sysadmin_cannot_decide_their_own_request(scene, store):
+    """Four eyes has no sysadmin exception: the requester is refused even as a
+    sysadmin, whose sanctioned path is `publication_publish`."""
+    sysadmin = factories.Sysadmin()
+    created = request_for(sysadmin, scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            sysadmin,
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert "four eyes" in str(excinfo.value).lower()
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert the_row(scene["dataset"]["id"]).status == "pending"
 
 
 def test_list_returns_only_what_the_caller_may_see(scene, store):
@@ -478,7 +632,11 @@ def test_a_failed_flip_on_publish_leaves_the_pending_request_untouched(
     request_for(scene["editor"], scene["dataset"]["id"])
 
     with pytest.raises(toolkit.ValidationError):
-        call_as(scene["admin"], "publication_publish", dataset_id=scene["dataset"]["id"])
+        call_as(
+            factories.Sysadmin(),
+            "publication_publish",
+            dataset_id=scene["dataset"]["id"],
+        )
 
     row = the_row(scene["dataset"]["id"])
     assert row.status == "pending"
@@ -508,6 +666,25 @@ def test_create_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
 def test_publish_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
     """The same hole lived in the other writing action."""
     with pytest.raises(toolkit.ObjectNotFound):
-        call_as(scene["admin"], "publication_publish", dataset_id="no-such-dataset")
+        call_as(
+            factories.Sysadmin(),
+            "publication_publish",
+            dataset_id="no-such-dataset",
+        )
+
+    assert rows() == []
+
+
+def test_a_non_sysadmin_gets_not_found_for_an_unknown_dataset(scene, store):
+    """Contract rule 7: an unresolvable `dataset_id` answers `NotFound`, not
+    `403` — for a non-sysadmin too. The auth function resolves the id first and
+    defers existence to the action; the capacity predicate narrows *who* may
+    publish, it does not pre-empt *whether the thing exists*."""
+    with pytest.raises(toolkit.ObjectNotFound):
+        call_as(
+            scene["admin"],
+            "publication_publish",
+            dataset_id="no-such-dataset",
+        )
 
     assert rows() == []
