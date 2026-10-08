@@ -360,7 +360,12 @@ running CKAN 2.12.0 (`/srv/app/src/ckan`, `0058b2eb…`) or marked as **relayed*
   the row (`pkg.purge()`) and writes neither `private` nor `state`. It is `sysadmin`-only
   (`ckan/logic/auth/delete.py`), so the blast radius is narrow: a purge with a `pending` request leaves
   the row behind, nothing annuls it, and the single-`pending` index only bites if the dataset id is
-  reused.
+  reused. **Observed in the wild, 2026-10-08** *(relayed from the consuming portal's probe)*: five probe
+  runs left **48** rows in the store whose datasets no longer existed — **25 `annulled`** (those went
+  through `package_delete`, which **does** fire the hook) and **19 `approved` + 3 `cancelled` + 1
+  `pending`** (those went through `dataset_purge`, which does not). A probe that trusts the hook leaves
+  residue in the store **while its catalog reports zero leftovers**: the two counts look at different
+  tables. The fix on that side is to delete the store rows before purging, not to rely on the hook.
 - **`bulk_update_delete` does not fire it either.** It soft-deletes through
   `_bulk_update_dataset(..., {'state': 'deleted'})`, which loops `package_patch`; the wall now refuses
   an organization `admin`'s `state` change, so that admin's delete is refused before it removes the
