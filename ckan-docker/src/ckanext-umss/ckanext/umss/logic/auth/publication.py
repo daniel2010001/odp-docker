@@ -38,6 +38,13 @@ __all__ = [
     "DECIDE_FOUR_EYES_MSG",
     "DECIDE_REQUESTER_CAPACITY_MSG",
     "PUBLISH_DENIED_MSG",
+    "FOUR_EYES_LABEL",
+    "REQUESTER_CAPACITY_LABEL",
+    "NOT_AN_APPROVER_LABEL",
+    "NOT_A_SYSADMIN_LABEL",
+    "ALREADY_PUBLIC_LABEL",
+    "CANNOT_REQUEST_LABEL",
+    "CANNOT_CANCEL_LABEL",
 ]
 
 
@@ -45,26 +52,47 @@ __all__ = [
 UPDATE_PERMISSION = "update_dataset"
 ADMIN_PERMISSION = "admin"
 
-REQUEST_DENIED_MSG = (
-    "Only a user who can update this dataset may ask for it to be published"
+# The refusal **labels** are the frozen interface a consumer matches on:
+# every message below reads `<label>: <sentence>`, the label is the part that
+# must not change, and the sentence after it is free prose. Each label names
+# exactly one refusal fact, and all of them are distinct.
+FOUR_EYES_LABEL = "Four eyes"
+REQUESTER_CAPACITY_LABEL = "Requester capacity"
+NOT_AN_APPROVER_LABEL = "Not an approver"
+NOT_A_SYSADMIN_LABEL = "Not a sysadmin"
+ALREADY_PUBLIC_LABEL = "Already public"
+CANNOT_REQUEST_LABEL = "Cannot request"
+CANNOT_CANCEL_LABEL = "Cannot cancel"
+
+REQUEST_DENIED_MSG = "%s: %s" % (
+    CANNOT_REQUEST_LABEL,
+    "only a user who can update this dataset may ask for it to be published",
 )
-CANCEL_DENIED_MSG = (
-    "Only the requester or an organization administrator may cancel this request"
+CANCEL_DENIED_MSG = "%s: %s" % (
+    CANNOT_CANCEL_LABEL,
+    "only the requester or an organization administrator may cancel this request",
 )
-DECIDE_DENIED_MSG = (
-    "Only an organization administrator may decide a publication request"
+DECIDE_DENIED_MSG = "%s: %s" % (
+    NOT_AN_APPROVER_LABEL,
+    "only an organization administrator may decide a publication request",
 )
-DECIDE_FOUR_EYES_MSG = (
-    "Four eyes: the approver cannot be the requester of the request they decide"
+DECIDE_FOUR_EYES_MSG = "%s: %s" % (
+    FOUR_EYES_LABEL,
+    "the approver cannot be the requester of the request they decide",
 )
-DECIDE_REQUESTER_CAPACITY_MSG = (
-    "The requester no longer has permission to update this dataset, so the "
-    "request cannot be decided"
+DECIDE_REQUESTER_CAPACITY_MSG = "%s: %s" % (
+    REQUESTER_CAPACITY_LABEL,
+    "the requester can no longer update this dataset, so the request cannot "
+    "be decided",
 )
-PUBLISH_DENIED_MSG = (
-    "Only a sysadmin may publish a dataset directly"
+PUBLISH_DENIED_MSG = "%s: %s" % (
+    NOT_A_SYSADMIN_LABEL,
+    "only a sysadmin may publish a dataset directly",
 )
-ALREADY_PUBLIC_MSG = "That dataset is already public"
+ALREADY_PUBLIC_MSG = "%s: %s" % (
+    ALREADY_PUBLIC_LABEL,
+    "that dataset is already public",
+)
 
 
 def _org_id_of_dataset(dataset_id):

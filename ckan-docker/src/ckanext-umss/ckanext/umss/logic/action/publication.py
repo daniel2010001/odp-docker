@@ -120,20 +120,69 @@ def _name_key(user_id, names):
     return names.get(user_id, UNKNOWN_NAME)
 
 
-def _row_dict(row, names=None):
+def _row_dict(row, names=None, datasets=None):
     """The row as the API will answer it: the declared columns, keyed by name,
-    plus the two presentation names (rule 3).
+    plus the presentation fields the portal reads (rule 3).
 
-    `names` is the batched resolution for the whole call (`_names_for`); when it
-    is omitted — a single-row return — both id columns are resolved here in one
-    query, so one row and a whole page answer the same shape at the same cost.
+    `names` is the batched user resolution for the whole call (`_names_for`)
+    and `datasets` the batched package/organisation resolution
+    (`_datasets_by_id`); when either is omitted — a single-row return — it is
+    resolved here in one batched query, so one row and a whole page answer the
+    same shape at the same cost per resolver.
     """
     data = {column.name: getattr(row, column.name) for column in row.__table__.columns}
     if names is None:
         names = _names_for((row.requested_by, row.approved_by))
+    if datasets is None:
+        datasets = _datasets_by_id((row.dataset_id,))
     data["requested_by_name"] = _name_key(row.requested_by, names)
     data["approved_by_name"] = _name_key(row.approved_by, names)
+    data["dataset_title"] = _dataset_title(row.dataset_id, datasets)
+    data["organization_title"] = _organization_title(row.dataset_id, datasets)
     return data
+
+
+def _has_text(value):
+    """Whether a resolved title carries text. An empty or whitespace-only
+    title is a presentation hole, not a value: the consumer's natural code is
+    `title ?? fallback`, an empty string is truthy there, and it renders as a
+    blank line everywhere. So a blank title answers `None`, exactly like an
+    unset id answers `None` for the names."""
+    return isinstance(value, str) and value.strip() != ""
+
+
+def _dataset_title(dataset_id, datasets):
+    """The dataset's own title, with rule 3's two empties: an unset
+    `dataset_id` answers `None`, a set-but-unresolvable one answers the neutral
+    token `"unknown"` — never the raw id in a field called `..._title`. A
+    dataset that resolves but carries an empty or whitespace-only title answers
+    `None`, not a blank string."""
+    if not dataset_id:
+        return None
+    meta = datasets.get(dataset_id)
+    if meta is None:
+        return UNKNOWN_NAME
+    return meta["dataset_title"] if _has_text(meta["dataset_title"]) else None
+
+
+def _organization_title(dataset_id, datasets):
+    """The owner organisation's title, with the same two empties: an unowned
+    dataset answers `None` (there is nothing to resolve), and a `dataset_id`
+    that is set but does not resolve answers `"unknown"` — the dataset is gone,
+    so its organisation is unknown too. A resolvable dataset whose `owner_org`
+    points at a missing group answers `"unknown"` as well (the reference is set,
+    the thing behind it is not there); one whose group resolves but carries an
+    empty or whitespace-only title answers `None`, not a blank string."""
+    if not dataset_id:
+        return None
+    meta = datasets.get(dataset_id)
+    if meta is None:
+        return UNKNOWN_NAME
+    if not meta["owner_org"]:
+        return None
+    if meta["organization_id"] is None:
+        return UNKNOWN_NAME
+    return meta["organization_title"] if _has_text(meta["organization_title"]) else None
 
 
 def _request_row(request_id):
@@ -331,13 +380,14 @@ def publication_request_list(context, data_dict):
     rows = query.order_by(umss_model.PublicationRequest.created_at).all()
 
     caller = caller_id(context)
-    org_of = _orgs_by_dataset(row.dataset_id for row in rows)
+    datasets = _datasets_by_id(row.dataset_id for row in rows)
     allowed_orgs = {}
 
     def may_see(dataset_id):
-        org_id = org_of.get(dataset_id)
-        if org_id is None:
+        meta = datasets.get(dataset_id)
+        if meta is None or not meta["owner_org"]:
             return False
+        org_id = meta["owner_org"]
         if org_id not in allowed_orgs:
             allowed_orgs[org_id] = ckan_authz.has_user_permission_for_group_or_org(
                 org_id, context.get("user"), UPDATE_PERMISSION
@@ -354,16 +404,43 @@ def publication_request_list(context, data_dict):
         for row in visible
         for user_id in (row.requested_by, row.approved_by)
     )
-    return [_row_dict(row, names) for row in visible]
+    return [_row_dict(row, names, datasets) for row in visible]
 
 
-def _orgs_by_dataset(dataset_ids):
-    """`{dataset_id: owner_org}` for the given ids, in one query."""
+def _datasets_by_id(dataset_ids):
+    """`{dataset_id: {owner_org, organization_id, dataset_title,
+    organization_title}}` for the given ids, in **one** query.
+
+    The owner organisation is joined in the same statement, so the two titles
+    the portal reads ride the organisation resolution instead of adding a query
+    to it: the page pays one resolver statement, not one per row (rule 3's cost
+    shape). `organization_id` is the joined group's own id, which is what
+    distinguishes a **missing** group (`None` -> `"unknown"`) from a group that
+    resolves with a blank title (`None` title -> `None`). A dataset the query
+    does not return is one that no longer resolves; the caller decides the
+    fallback, exactly as `_names_for` leaves its empties to `_name_key`.
+    """
     wanted = set(dataset_ids)
     if not wanted:
         return {}
-    return dict(
-        _Session.query(model.Package.id, model.Package.owner_org)
+    rows = (
+        _Session.query(
+            model.Package.id,
+            model.Package.owner_org,
+            model.Package.title,
+            model.Group.id,
+            model.Group.title,
+        )
+        .outerjoin(model.Group, model.Group.id == model.Package.owner_org)
         .filter(model.Package.id.in_(wanted))
         .all()
     )
+    return {
+        dataset_id: {
+            "owner_org": owner_org,
+            "organization_id": organization_id,
+            "dataset_title": dataset_title,
+            "organization_title": organization_title,
+        }
+        for dataset_id, owner_org, dataset_title, organization_id, organization_title in rows
+    }

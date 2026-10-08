@@ -33,6 +33,7 @@ import ckan.model as ckan_model
 import ckan.plugins.toolkit as toolkit
 from ckan.tests import factories, helpers
 
+from ckanext.umss import auth as umss_auth
 from ckanext.umss import model as umss_model
 from ckanext.umss.logic.action import publication as actions
 from ckanext.umss.logic.auth import publication as auth_publication
@@ -202,6 +203,14 @@ def test_create_is_idempotent_and_returns_the_existing_pending_row(scene, store)
 
     assert first["id"] == second["id"]
     assert len(rows()) == 1
+    # The idempotent path returns `_row_dict(existing)`; it must carry the same
+    # presentation fields as the insert path, not just the id. Covered here
+    # rather than reasoned about, because a consumer branches on neither action
+    # nor path.
+    for row in (first, second):
+        assert row["dataset_title"] == scene["dataset"]["title"]
+        assert row["organization_title"] == scene["org"]["title"]
+        assert row["requested_by_name"] == scene["editor"]["name"]
 
 
 def test_cancel_marks_the_request_cancelled_and_does_not_flip(scene, store):
@@ -444,7 +453,7 @@ def test_an_org_admin_cannot_publish_directly(scene, store):
             dataset_id=scene["dataset"]["id"],
         )
 
-    assert "sysadmin" in str(excinfo.value).lower()
+    assert auth_publication.NOT_A_SYSADMIN_LABEL + ": " in str(excinfo.value)
     assert stored(scene["dataset"]["id"])["private"] is True
     assert rows() == []
 
@@ -569,7 +578,7 @@ def test_the_requester_cannot_decide_their_own_request(scene, store):
             approve=True,
         )
 
-    assert "four eyes" in str(excinfo.value).lower()
+    assert auth_publication.FOUR_EYES_LABEL + ": " in str(excinfo.value)
     assert stored(scene["dataset"]["id"])["private"] is True
     assert the_row(scene["dataset"]["id"]).status == "pending"
 
@@ -608,8 +617,52 @@ def test_a_sysadmin_cannot_decide_their_own_request(scene, store):
             approve=True,
         )
 
-    assert "four eyes" in str(excinfo.value).lower()
+    assert auth_publication.FOUR_EYES_LABEL + ": " in str(excinfo.value)
     assert stored(scene["dataset"]["id"])["private"] is True
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_the_decide_path_checks_capacity_before_four_eyes(scene, store):
+    """The decide path's precedence, measured: the requester's **current
+    capacity** is re-checked before four eyes, so an approver who opened the
+    request and then lost their capacity gets `Requester capacity`, not
+    `Four eyes`. The four-eyes label therefore only appears for a requester who
+    still holds the admin capacity the decision demands."""
+    created = request_for(scene["admin"], scene["dataset"]["id"])
+
+    revoke_membership(scene["org"]["id"], scene["admin"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.REQUESTER_CAPACITY_LABEL + ": " in str(excinfo.value)
+    assert auth_publication.FOUR_EYES_LABEL + ": " not in str(excinfo.value)
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_a_non_approver_requester_gets_not_an_approver_not_four_eyes(scene, store):
+    """The other half of the precedence, measured: an `editor` who opened a
+    request is not an approver, so the decide refusal is `Not an approver` —
+    the `Not an approver` branch sits before the four-eyes branch for a
+    non-sysadmin, and four eyes is reserved for a requester who **has** the
+    admin capacity."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["editor"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.NOT_AN_APPROVER_LABEL + ": " in str(excinfo.value)
+    assert auth_publication.FOUR_EYES_LABEL + ": " not in str(excinfo.value)
     assert the_row(scene["dataset"]["id"]).status == "pending"
 
 
@@ -834,65 +887,121 @@ def test_the_motive_tokens_are_the_interface_values():
     )
 
 
-def test_the_publication_refusal_literals_are_the_interface_values():
-    """The publication actions' three refusal messages are interface values a
-    **consumer** matches on: the portal reads them from a single constant that
+def test_the_nine_refusal_labels_are_the_interface_values():
+    """The nine refusal **labels** are the cross-repository interface values a
+    consumer matches on: the portal reads them from a single constant that
     points at `PUBLICATION-ACTIONS.md`, and CKAN gives no machine-readable code
     — an authorization failure is only `{"__type": "Authorization Error",
-    "message": ...}` — so the text *is* the interface.
+    "message": ...}` — so the label is the interface and the sentence after the
+    colon is free prose.
 
-    The three literals are not equally guarded elsewhere, so this pin's
-    marginal value differs by value. `DECIDE_FOUR_EYES_MSG` was already
-    constrained by the **fragment** `"four eyes"` in
-    `test_the_requester_cannot_decide_their_own_request` and
-    `test_a_sysadmin_cannot_decide_their_own_request`; a reword that keeps the
-    fragment passes there, and that is exactly the reword the consumer cannot
-    absorb, because it matches the whole string.
-    `DECIDE_REQUESTER_CAPACITY_MSG` and `ALREADY_PUBLIC_MSG` were referenced
-    elsewhere only through the Python constants, so a typo in their values would
-    pass every other test in this file. This test upgrades the first to an exact
-    value and gives the other two their only exact value.
+    This pin freezes the labels, not the sentences: rewording the prose after a
+    colon passes, changing a label fails. Breaking it means either a refusal the
+    portal knows arrives under a label it does not, or two different refusals
+    (in particular the two modules' `PUBLISH_DENIED_MSG`) can no longer be told
+    apart.
 
-    A **pin, not a RED**: it passes against the constants as first written. It
-    freezes the *value*, not the wording — the wording is not under review
-    here. Rewording any of the three fails this test, and that failure is the
-    signal that a consumer constant pointing at the contract file has gone
-    stale, which is the whole reason the value is pinned rather than the
-    wording trusted.
+    All nine are asserted distinct here because that distinctness *is* the
+    interface: two constants called `PUBLISH_DENIED_MSG` in different modules
+    carried different texts, and a consumer keying on the name alone conflated
+    the wall's role denial with the action's sysadmin denial.
 
-    The module's own `PUBLISH_DENIED_MSG` — the action's sysadmin denial, a
-    different literal from the wall's constant of the same name — is pinned by
-    `test_the_action_denial_literal_is_pinned` just below, so the name collision
-    is pinned on both sides rather than explained in prose only.
+    A **pin, not a RED**: it passes against the constants as first written.
     """
-    assert (
-        auth_publication.DECIDE_FOUR_EYES_MSG
-        == "Four eyes: the approver cannot be the requester of the request they decide"
-    )
-    assert (
-        auth_publication.DECIDE_REQUESTER_CAPACITY_MSG
-        == "The requester no longer has permission to update this dataset, so "
-        "the request cannot be decided"
-    )
-    assert auth_publication.ALREADY_PUBLIC_MSG == "That dataset is already public"
+    action_labels = [
+        auth_publication.FOUR_EYES_LABEL,
+        auth_publication.REQUESTER_CAPACITY_LABEL,
+        auth_publication.NOT_AN_APPROVER_LABEL,
+        auth_publication.NOT_A_SYSADMIN_LABEL,
+        auth_publication.ALREADY_PUBLIC_LABEL,
+        auth_publication.CANNOT_REQUEST_LABEL,
+        auth_publication.CANNOT_CANCEL_LABEL,
+    ]
+    wall_labels = [
+        umss_auth.PUBLICATION_FLOW_LABEL,
+        umss_auth.PUBLISH_DENIED_LABEL,
+    ]
+
+    assert auth_publication.FOUR_EYES_LABEL == "Four eyes"
+    assert auth_publication.REQUESTER_CAPACITY_LABEL == "Requester capacity"
+    assert auth_publication.NOT_AN_APPROVER_LABEL == "Not an approver"
+    assert auth_publication.NOT_A_SYSADMIN_LABEL == "Not a sysadmin"
+    assert auth_publication.ALREADY_PUBLIC_LABEL == "Already public"
+    assert auth_publication.CANNOT_REQUEST_LABEL == "Cannot request"
+    assert auth_publication.CANNOT_CANCEL_LABEL == "Cannot cancel"
+    assert umss_auth.PUBLICATION_FLOW_LABEL == "Publication flow"
+    assert umss_auth.PUBLISH_DENIED_LABEL == "Publish denied"
+
+    labels = action_labels + wall_labels
+    assert len(labels) == 9
+    assert len(set(labels)) == 9, labels
+
+    messages = [
+        (auth_publication.FOUR_EYES_LABEL, auth_publication.DECIDE_FOUR_EYES_MSG),
+        (
+            auth_publication.REQUESTER_CAPACITY_LABEL,
+            auth_publication.DECIDE_REQUESTER_CAPACITY_MSG,
+        ),
+        (auth_publication.NOT_AN_APPROVER_LABEL, auth_publication.DECIDE_DENIED_MSG),
+        (auth_publication.NOT_A_SYSADMIN_LABEL, auth_publication.PUBLISH_DENIED_MSG),
+        (auth_publication.ALREADY_PUBLIC_LABEL, auth_publication.ALREADY_PUBLIC_MSG),
+        (auth_publication.CANNOT_REQUEST_LABEL, auth_publication.REQUEST_DENIED_MSG),
+        (auth_publication.CANNOT_CANCEL_LABEL, auth_publication.CANCEL_DENIED_MSG),
+        (umss_auth.PUBLICATION_FLOW_LABEL, umss_auth.PUBLISH_VIA_FLOW_MSG),
+        (umss_auth.PUBLISH_DENIED_LABEL, umss_auth.PUBLISH_DENIED_MSG),
+    ]
+    for label, message in messages:
+        assert message.startswith(label + ": "), (label, message)
 
 
-def test_the_action_denial_literal_is_pinned():
-    """The sixth consumer-visible refusal literal: this module's **own**
-    `PUBLISH_DENIED_MSG`, the `publication_publish` action's sysadmin denial.
-    It shares its **name** with the wall's constant in `ckanext.umss.auth`
-    (`test_auth.py` pins that one) but not its value, and the two are different
-    refusals: the wall's names the role for a stock `package_patch`, this one
-    names the sysadmin requirement for the action. Pinning both sides is what
-    keeps a consumer from keying on the name alone and conflating them.
+def test_every_refusal_message_begins_with_a_declared_label():
+    """The invariant the labels exist for: **no consumer ever has to match a
+    sentence** — for every refusal the modules declare as a message constant.
 
-    A **pin, not a RED**: it passes against the constant as first written, and
-    it freezes the value rather than reviewing the wording.
+    This walks every refusal declared as a module-level `*_MSG` string in the two
+    refusal modules and every declared `*_LABEL`, and fails if a message does not
+    open with `<label>: `. The reach is exactly that and no more: it does **not**
+    see inline strings, handler-local strings, `ValidationError` dict entries, or
+    constants named otherwise, so it is a guard on the declared-message surface,
+    not a proof about every string these modules emit. Within that surface it is
+    structural rather than a list of the nine known messages: a future refusal
+    declared with a label passes, one declared without fails, and a future label
+    is picked up automatically from the module.
     """
-    assert (
-        auth_publication.PUBLISH_DENIED_MSG
-        == "Only a sysadmin may publish a dataset directly"
+    labels = set()
+    for module in (auth_publication, umss_auth):
+        labels |= {
+            value
+            for name, value in vars(module).items()
+            if name.endswith("_LABEL") and isinstance(value, str)
+        }
+    assert labels
+
+    prefixes = tuple(label + ": " for label in labels)
+    seen = 0
+    for module in (auth_publication, umss_auth):
+        for name, value in vars(module).items():
+            if not (name.endswith("_MSG") and isinstance(value, str)):
+                continue
+            seen += 1
+            assert value.startswith(prefixes), (module.__name__, name, value)
+    assert seen >= 9, seen
+
+
+def test_the_action_denial_has_its_own_label():
+    """This module's own `PUBLISH_DENIED_MSG` — the `publication_publish`
+    action's sysadmin denial — carries `Not a sysadmin`, distinct from the
+    wall's `Publish denied` for its own `PUBLISH_DENIED_MSG` in
+    `ckanext.umss.auth`. The two constants share a name and differ in text; the
+    labels are what make them separable by the consumer without reading the
+    module.
+
+    A **pin, not a RED**: it passes against the constant as first written.
+    """
+    assert auth_publication.PUBLISH_DENIED_MSG.startswith(
+        auth_publication.NOT_A_SYSADMIN_LABEL + ": "
     )
+    assert auth_publication.NOT_A_SYSADMIN_LABEL != umss_auth.PUBLISH_DENIED_LABEL
 
 
 def test_decide_re_checks_the_owning_organization_at_decision_time(scene, store):
@@ -972,7 +1081,8 @@ def test_decide_refuses_when_the_requester_lost_their_capacity(scene, store):
         )
 
     assert auth_publication.DECIDE_REQUESTER_CAPACITY_MSG in str(excinfo.value)
-    assert "four eyes" not in str(excinfo.value).lower()
+    assert auth_publication.REQUESTER_CAPACITY_LABEL + ": " in str(excinfo.value)
+    assert auth_publication.FOUR_EYES_LABEL + ": " not in str(excinfo.value)
     assert the_row(scene["dataset"]["id"]).status == "pending"
     assert stored(scene["dataset"]["id"])["private"] is True
 
@@ -1003,7 +1113,8 @@ def test_a_sysadmin_approver_is_also_refused_when_the_requester_lost_capacity(
         )
 
     assert auth_publication.DECIDE_REQUESTER_CAPACITY_MSG in str(excinfo.value)
-    assert "four eyes" not in str(excinfo.value).lower()
+    assert auth_publication.REQUESTER_CAPACITY_LABEL + ": " in str(excinfo.value)
+    assert auth_publication.FOUR_EYES_LABEL + ": " not in str(excinfo.value)
     assert the_row(scene["dataset"]["id"]).status == "pending"
     assert stored(scene["dataset"]["id"])["private"] is True
 
@@ -1025,7 +1136,8 @@ def test_decide_fails_closed_when_the_requester_cannot_be_resolved(scene, store)
         )
 
     assert auth_publication.DECIDE_REQUESTER_CAPACITY_MSG in str(excinfo.value)
-    assert "four eyes" not in str(excinfo.value).lower()
+    assert auth_publication.REQUESTER_CAPACITY_LABEL + ": " in str(excinfo.value)
+    assert auth_publication.FOUR_EYES_LABEL + ": " not in str(excinfo.value)
     assert the_row(scene["dataset"]["id"]).status == "pending"
 
 
@@ -1112,10 +1224,16 @@ def test_deleting_a_dataset_without_the_store_table_is_a_clean_no_op(scene):
 
 
 NAME_KEYS = ("requested_by_name", "approved_by_name")
+TITLE_KEYS = ("dataset_title", "organization_title")
 
 
 def assert_names_present(row):
     for key in NAME_KEYS:
+        assert key in row, (key, sorted(row))
+
+
+def assert_titles_present(row):
+    for key in TITLE_KEYS:
         assert key in row, (key, sorted(row))
 
 
@@ -1199,13 +1317,232 @@ def test_every_action_returns_rows_carrying_both_presentation_names(scene, store
 
 
 def test_the_row_dict_is_additive_over_the_eleven_table_columns(scene, store):
-    """The change adds exactly two keys: the eleven table columns stay, and no
+    """The change adds exactly four keys: the eleven table columns stay, and no
     other key appears."""
     created = request_for(scene["editor"], scene["dataset"]["id"])
 
     columns = {column.name for column in umss_model.PublicationRequest.__table__.columns}
     assert len(columns) == 11
-    assert set(created) == columns | set(NAME_KEYS)
+    assert set(created) == columns | set(NAME_KEYS) | set(TITLE_KEYS)
+
+
+def dataset_resolution_selects(statements):
+    """The `SELECT ... FROM package ... WHERE package.id IN (...)` statements,
+    the only shape the batched dataset resolver emits. A single-dataset
+    `model.Package.get` uses `WHERE package.id = ...` and therefore never matches
+    this shape, which is what keeps this counter on the resolver rather than on
+    every package lookup the call happens to make. `package` is not a reserved
+    word in PostgreSQL, so it is emitted unquoted (unlike `"user"`); whitespace
+    and quotes are normalised so the match does not depend on either.
+    """
+    selects = []
+    for statement in statements:
+        flat = " ".join(statement.lower().replace('"', "").split())
+        if " from package " in " %s " % flat and "package.id in" in flat:
+            selects.append(statement)
+    return selects
+
+
+def test_every_action_returns_rows_carrying_both_dataset_titles(scene, store):
+    """The portal's queue reads a dataset by its **title** and needs the
+    organisation to locate the request, so all five faces answer the same two
+    additive keys: `dataset_title` and `organization_title`."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+
+    created = call_as(
+        editor, "publication_request_create", dataset_id=scene["dataset"]["id"]
+    )
+    assert_titles_present(created)
+
+    cancelled = call_as(editor, "publication_request_cancel", request_id=created["id"])
+    assert_titles_present(cancelled)
+
+    rejected_source = request_for(editor, fresh_dataset(scene)["id"])
+    rejected = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=rejected_source["id"],
+        approve=False,
+        comments="no",
+    )
+    assert_titles_present(rejected)
+
+    approved = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=request_for(editor, scene["second_dataset"]["id"])["id"],
+        approve=True,
+    )
+    assert_titles_present(approved)
+
+    published = call_as(
+        factories.Sysadmin(),
+        "publication_publish",
+        dataset_id=fresh_dataset(scene)["id"],
+    )
+    assert_titles_present(published)
+
+    listed = call_as(admin, "publication_request_list")
+    assert listed
+    for row in listed:
+        assert_titles_present(row)
+
+
+def test_the_dataset_and_org_titles_resolve_to_the_stored_titles(scene, store):
+    """The two keys carry the package's own title and its owner
+    organisation's title, not ids and not blanks."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    assert created["dataset_title"] == scene["dataset"]["title"]
+    assert created["dataset_title"] != scene["dataset"]["id"]
+    assert created["organization_title"] == scene["org"]["title"]
+    assert created["organization_title"] != scene["org"]["id"]
+
+
+def test_an_unowned_dataset_answers_none_for_the_organisation_title(scene, store):
+    """Rule 3's two empties, title half: a dataset with no owner organisation
+    has nothing to resolve, so `organization_title` is `None` — an empty field
+    answers `None`, never `"unknown"` (which claims a broken reference).
+
+    The row is built against an owned dataset and then unowned at the model
+    layer on purpose: `publication_request_create` refuses an unowned dataset
+    (the caller cannot hold `update_dataset` on nothing), so the ordinary path
+    cannot produce this row."""
+    editor = scene["editor"]
+    dataset = fresh_dataset(scene)
+    created = request_for(editor, dataset["id"])
+
+    package = ckan_model.Session.get(ckan_model.Package, dataset["id"])
+    package.owner_org = None
+    ckan_model.Session.commit()
+
+    listed = call_as(editor, "publication_request_list")
+    target = [row for row in listed if row["id"] == created["id"]]
+    assert len(target) == 1
+    assert target[0]["organization_title"] is None
+    assert target[0]["dataset_title"] == dataset["title"]
+
+
+def test_a_blank_title_answers_none_in_both_fields(scene, store):
+    """A resolvable dataset or organisation whose title is empty or
+    whitespace-only is a presentation hole, not a value: the consumer's natural
+    code is `title ?? fallback`, an empty string is truthy there, and it renders
+    as a blank line everywhere. Both fields answer `None`, exactly like an unset
+    id answers `None` for the names — never `""` and never `"   "`."""
+    editor = scene["editor"]
+    dataset = fresh_dataset(scene)
+    created = request_for(editor, dataset["id"])
+
+    package = ckan_model.Session.get(ckan_model.Package, dataset["id"])
+    package.title = "   "
+    organisation = ckan_model.Session.get(ckan_model.Group, scene["org"]["id"])
+    organisation.title = ""
+    ckan_model.Session.commit()
+
+    listed = call_as(editor, "publication_request_list")
+    target = [row for row in listed if row["id"] == created["id"]]
+    assert len(target) == 1
+    assert target[0]["dataset_title"] is None
+    assert target[0]["dataset_title"] != ""
+    assert target[0]["organization_title"] is None
+    assert target[0]["organization_title"] != ""
+
+
+def test_an_owner_org_pointing_at_a_missing_group_answers_unknown(scene, store):
+    """The other blank neighbouring the empty title: the dataset resolves and
+    its `owner_org` is set, but the group behind it does not. That is a broken
+    **reference**, so `organization_title` is `"unknown"` — the empty-title
+    branch must not swallow it. The dataset's own title still resolves."""
+    editor = scene["editor"]
+    ghost = "00000000-0000-0000-0000-000000000000"
+    dataset = fresh_dataset(scene)
+    created = request_for(editor, dataset["id"])
+
+    package = ckan_model.Session.get(ckan_model.Package, dataset["id"])
+    package.owner_org = ghost
+    ckan_model.Session.commit()
+
+    listed = call_as(editor, "publication_request_list")
+    target = [row for row in listed if row["id"] == created["id"]]
+    assert len(target) == 1
+    assert target[0]["dataset_title"] == dataset["title"]
+    assert target[0]["organization_title"] == "unknown"
+
+
+def test_a_gone_dataset_answers_unknown_for_both_titles(scene, store):
+    """Rule 3's other empty: a `dataset_id` that is **set but does not
+    resolve** answers the neutral token `"unknown"` for both titles — never the
+    raw id in a field called `..._title`."""
+    editor = scene["editor"]
+    ghost = "00000000-0000-0000-0000-000000000000"
+    created = request_for(editor, scene["dataset"]["id"])
+
+    row = the_row(scene["dataset"]["id"])
+    row.dataset_id = ghost
+    ckan_model.Session.commit()
+
+    listed = call_as(editor, "publication_request_list")
+    target = [candidate for candidate in listed if candidate["id"] == created["id"]]
+    assert len(target) == 1
+    assert target[0]["dataset_id"] == ghost
+    assert target[0]["dataset_title"] == "unknown"
+    assert target[0]["dataset_title"] != ghost
+    assert target[0]["organization_title"] == "unknown"
+    assert target[0]["organization_title"] != ghost
+
+
+def test_list_resolves_dataset_and_org_titles_in_one_query_for_the_whole_page(
+    scene, store
+):
+    """The cost contract: the page's dataset and organisation titles ride the
+    **same single query** as the owner-organisation resolution. Three datasets
+    under one list call must hit the package/group join once; a per-row resolver
+    would measure three. The group join in that same statement is what makes
+    the titles ride the organisation resolution rather than add a query to it."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+    for dataset in (
+        scene["dataset"],
+        scene["second_dataset"],
+        fresh_dataset(scene),
+    ):
+        request_for(editor, dataset["id"])
+
+    listed, statements = measured(lambda: call_as(admin, "publication_request_list"))
+
+    assert len(listed) >= 3
+    assert all(row["dataset_title"] for row in listed)
+
+    dataset_selects = dataset_resolution_selects(statements)
+    assert len(dataset_selects) == 1, dataset_selects
+    assert "join" in dataset_selects[0].lower(), dataset_selects[0]
+    assert "group" in dataset_selects[0].lower(), dataset_selects[0]
+
+
+def test_a_single_row_return_resolves_dataset_titles_in_one_query(scene, store):
+    """The single-row faces share the batching: the dataset and its
+    organisation resolve in one package/group statement, not two."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+    created = request_for(editor, scene["dataset"]["id"])
+
+    decided, statements = measured(
+        lambda: call_as(
+            admin,
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+    )
+
+    assert decided["dataset_title"] == scene["dataset"]["title"]
+    assert decided["organization_title"] == scene["org"]["title"]
+
+    dataset_selects = dataset_resolution_selects(statements)
+    assert len(dataset_selects) == 1, dataset_selects
+    assert "join" in dataset_selects[0].lower(), dataset_selects[0]
+    assert "group" in dataset_selects[0].lower(), dataset_selects[0]
 
 
 def test_the_names_resolve_the_ids_to_usernames(scene, store):
@@ -1363,3 +1700,5 @@ def test_a_single_row_return_resolves_both_ids_in_one_query(scene, store):
 
     user_selects = name_resolution_selects(statements)
     assert len(user_selects) == 1, user_selects
+
+

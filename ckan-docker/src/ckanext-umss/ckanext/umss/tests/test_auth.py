@@ -315,8 +315,9 @@ def test_private_false_on_an_already_public_dataset_requests_no_transition(scene
 
 def test_the_two_refusal_messages_are_distinguishable(scene):
     """A3.3: the wall carries two messages, and they are not interchangeable.
-    The non-administrator's names the required role; the administrator's names
-    the flow and the action it is not."""
+    Each carries its **own frozen label** as the first token, so the two
+    refusals separate on the label the portal matches rather than on the free
+    sentence after it."""
     with pytest.raises(logic.NotAuthorized) as editor_exc:
         call_as(scene["editor"], "package_patch",
                 id=scene["dataset"]["id"], private=False)
@@ -328,43 +329,36 @@ def test_the_two_refusal_messages_are_distinguishable(scene):
     assert umss_auth.PUBLISH_DENIED_MSG not in str(admin_exc.value)
     assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(admin_exc.value)
     assert umss_auth.PUBLISH_DENIED_MSG != umss_auth.PUBLISH_VIA_FLOW_MSG
-    # The administrator's message states the flow and the action it is not.
-    assert "publication flow" in umss_auth.PUBLISH_VIA_FLOW_MSG
-    assert "package_patch" in umss_auth.PUBLISH_VIA_FLOW_MSG
+    assert umss_auth.PUBLISH_DENIED_MSG.startswith(
+        umss_auth.PUBLISH_DENIED_LABEL + ": "
+    )
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG.startswith(
+        umss_auth.PUBLICATION_FLOW_LABEL + ": "
+    )
+    assert umss_auth.PUBLISH_DENIED_LABEL != umss_auth.PUBLICATION_FLOW_LABEL
 
 
-def test_the_wall_refusal_literals_are_the_interface_values():
-    """The wall's two refusal messages are interface values a **consumer**
-    matches on: the portal reads them from a single constant that points at
+def test_the_wall_refusal_labels_are_the_interface_values():
+    """The wall's two refusal **labels** are what a consumer matches on: the
+    portal reads them from a single constant that points at
     `PUBLICATION-ACTIONS.md`, and CKAN gives no machine-readable code — an
     authorization failure is only `{"__type": "Authorization Error",
-    "message": ...}` — so the text *is* the interface.
+    "message": ...}` — so the label is the interface and the sentence after it
+    is free prose.
 
-    The two literals are not equally guarded elsewhere, so this pin's marginal
-    value differs by value. `PUBLISH_VIA_FLOW_MSG` was already constrained in
-    `test_the_two_refusal_messages_are_distinguishable` by the **fragments**
-    `"publication flow"` and `"package_patch"`; a reword that keeps those two
-    fragments passes there, and that is exactly the reword the consumer cannot
-    absorb, because it matches the whole string. `PUBLISH_DENIED_MSG` was
-    referenced elsewhere only through the Python constant, so a typo in its
-    value would pass every other test in this file. This test upgrades the first
-    to an exact value and gives the second its only exact value.
+    This pin freezes the labels, not the sentences. Rewording the prose after a
+    colon passes; changing a label fails, and that failure is the signal that
+    the consumer's constant has gone stale. Breaking it means a refusal two
+    different callers receive can no longer be told apart, or a label the
+    portal does not know arrives where it expects one it does.
 
-    A **pin, not a RED**: it passes against the constants as first written. It
-    freezes the *value*, not the wording — the wording is not under review
-    here. Rewording either message fails this test, and that failure is the
-    signal that a consumer constant pointing at the contract file has gone
-    stale, which is the whole reason the value is pinned rather than the
-    wording trusted.
+    A **pin, not a RED**: it passes against the constants as first written.
     """
-    assert (
-        umss_auth.PUBLISH_DENIED_MSG
-        == "Only an organization administrator can publish a dataset"
-    )
-    assert (
-        umss_auth.PUBLISH_VIA_FLOW_MSG
-        == "Publication goes through the publication flow, not package_patch"
-    )
+    assert umss_auth.PUBLISH_DENIED_LABEL == "Publish denied"
+    assert umss_auth.PUBLICATION_FLOW_LABEL == "Publication flow"
+    assert umss_auth.PUBLISH_DENIED_LABEL != umss_auth.PUBLICATION_FLOW_LABEL
+    assert umss_auth.PUBLISH_DENIED_MSG.startswith("Publish denied: ")
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG.startswith("Publication flow: ")
 
 
 # ---------------------------------------------------------------------------
