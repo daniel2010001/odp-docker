@@ -41,6 +41,11 @@ services:
       # el `COPY ... /docker-entrypoint.d/` del Dockerfile ya lo hornea para
       # quien reconstruya.
       - ./ckan-docker/ckan/docker-entrypoint.d/02_disable_debug_toolbar.sh:/docker-entrypoint.d/02_disable_debug_toolbar.sh:ro
+      # La migración de la extensión. Sin esto el stack de dev sirve la extensión pero
+      # **sin la tabla del store** hasta que alguien corra `ckan db upgrade -p umss` a mano,
+      # y el `SUCCESS` de ese CLI no prueba nada: con `-p <plugin>` y `--skip-core` es un
+      # no-op silencioso. El script corre la migración y **verifica la tabla**.
+      - ./ckan-docker/ckan/docker-entrypoint.d/03_upgrade_umss_schema.sh:/docker-entrypoint.d/03_upgrade_umss_schema.sh:ro
 
     # ─── Andamiaje de DEV (homelab) — NO es el diseño de producción ───
     # CKAN necesita un ORIGEN PROPIO para que el navegador pueda cargar sus
