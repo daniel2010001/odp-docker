@@ -575,6 +575,53 @@ def test_list_returns_only_what_the_caller_may_see(scene, store):
     assert [r["id"] for r in seen_by_requester] == [mine["id"]]
 
 
+def test_create_stores_the_canonical_id_when_called_by_name(scene, store):
+    """The input may name the dataset any way CKAN accepts — `Package.get` takes
+    an id **or** a name — but the row has to carry the canonical one. A row keyed by
+    a name is invisible to every read path that resolves datasets by id, which is how
+    the approver's queue ends up empty for the request they must decide. Measured
+    live on 2026-10-08: `admin1` saw zero pending rows for a request `editor1` had
+    created by name, while `package_show` answered `200` for the same admin."""
+    by_name = request_for(scene["editor"], scene["dataset"]["name"])
+
+    assert by_name["dataset_id"] == scene["dataset"]["id"]
+
+
+def test_a_legacy_row_stored_by_name_is_still_resolved(scene, store):
+    """Rows written before the canonicalisation exist in deployed stores and carry
+    the name the caller used, so the read path has to tolerate them: that half is
+    what makes them visible **without a data migration**. Both the visibility
+    predicate and the presentation titles go through the same resolver, so both are
+    asserted here."""
+    ckan_model.Session.add(
+        umss_model.PublicationRequest(
+            dataset_id=scene["dataset"]["name"],
+            requested_visibility="public",
+            status=umss_model.PENDING,
+            requested_by=scene["editor"]["id"],
+        )
+    )
+    ckan_model.Session.commit()
+
+    seen = call_as(scene["admin"], "publication_request_list", status="pending")
+
+    assert len(seen) == 1
+    assert seen[0]["dataset_id"] == scene["dataset"]["name"]
+    assert seen[0]["dataset_title"] == scene["dataset"]["title"]
+    assert seen[0]["organization_title"] == scene["org"]["title"]
+
+
+def test_the_approver_sees_a_request_created_by_name(scene, store):
+    """The live defect end to end, in one test: the editor asks by name and the
+    organization admin — the caller who has to decide it — sees it in the pending
+    queue."""
+    created = request_for(scene["editor"], scene["dataset"]["name"])
+
+    seen = call_as(scene["admin"], "publication_request_list", status="pending")
+
+    assert [r["id"] for r in seen] == [created["id"]]
+
+
 # ---------------------------------------------------------------------------
 # The correction round: what the four-lens review at tier high opened
 #

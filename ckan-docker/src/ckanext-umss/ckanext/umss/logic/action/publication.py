@@ -245,8 +245,16 @@ def _commit_row(row, context, flip=False):
 def publication_request_create(context, data_dict):
     """D4: writes one `pending` row, and is idempotent on the pending one."""
     toolkit.check_access("publication_request_create", context, data_dict)
-    dataset_id = _required(data_dict, "dataset_id")
-    _existing_dataset(dataset_id)
+    # The input may name the dataset any way CKAN accepts — `Package.get` takes an id
+    # **or** a name, and that tolerance is deliberate. What gets **stored** has to be
+    # the canonical id: a row keyed by a name is invisible to every read path that
+    # resolves datasets by id (`_datasets_by_id`), which is how the approver's queue
+    # ends up empty for the very request they have to decide (measured live on
+    # 2026-10-08). It also closes a duplicate hole: the partial unique index is on
+    # `dataset_id`, so the same dataset reached by name and by id produced two
+    # `pending` rows.
+    dataset = _existing_dataset(_required(data_dict, "dataset_id"))
+    dataset_id = dataset.id
 
     existing = _pending_for(dataset_id)
     if existing is not None:
@@ -388,21 +396,43 @@ def _datasets_by_id(dataset_ids):
     rows = (
         _Session.query(
             model.Package.id,
+            model.Package.name,
             model.Package.owner_org,
             model.Package.title,
             model.Group.id,
             model.Group.title,
         )
         .outerjoin(model.Group, model.Group.id == model.Package.owner_org)
-        .filter(model.Package.id.in_(wanted))
+        # By id **or** by name, and both are looked up: rows written before the
+        # canonicalisation exist in deployed stores and carry the name the caller
+        # used, while every row written since carries the id. The mapping below is
+        # keyed by both forms so the caller's `datasets.get(row.dataset_id)` finds
+        # the dataset whichever form the row holds — that is what makes the old
+        # rows visible without a data migration.
+        .filter(
+            sa.or_(
+                model.Package.id.in_(wanted),
+                model.Package.name.in_(wanted),
+            )
+        )
         .all()
     )
-    return {
-        dataset_id: {
+    resolved = {}
+    for (
+        dataset_id,
+        dataset_name,
+        owner_org,
+        dataset_title,
+        organization_id,
+        organization_title,
+    ) in rows:
+        entry = {
             "owner_org": owner_org,
             "organization_id": organization_id,
             "dataset_title": dataset_title,
             "organization_title": organization_title,
         }
-        for dataset_id, owner_org, dataset_title, organization_id, organization_title in rows
-    }
+        resolved[dataset_id] = entry
+        if dataset_name:
+            resolved[dataset_name] = entry
+    return resolved
