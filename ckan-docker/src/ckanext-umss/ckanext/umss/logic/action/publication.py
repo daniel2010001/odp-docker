@@ -1,18 +1,19 @@
 """
-The five publication actions: `design.md` D4, and the door of D5.
+The four publication actions: `design.md` D4, and the door of D5.
 
 They are the queue and the door at once: `publication_request_create` /
-`_cancel` / `_decide` / `_list` are the queue, and `_decide {approve: true}` and
-`publication_publish` are the only **recorded** way a dataset becomes public.
-The wall in `ckanext.umss.auth` refuses a flip by every caller core admits, the
-organization admin included: the stock
-`package_patch {private: false}` route is refused, as is any change to `state`,
-`package_create` cannot store a public dataset, and `bulk_update_public` is
-covered by a chain of its own, which answers every non-sysadmin directly because
-it does not call `next_auth`. Core itself refuses `member`, a cross-organization
-`editor` and anonymous callers before the wall runs. So no raw core call is a
-second, unrecorded door for a caller below a sysadmin; the sysadmin's own stock
-bypass remains.
+`_cancel` / `_decide` / `_list` are the queue, and `_decide {approve: true}` is
+the only **recorded** way a dataset becomes public. There is no direct publish
+action: the author retired `publication_publish`, and the wall in
+`ckanext.umss.auth` refuses a flip by every caller, the sysadmin included — the
+stock `package_patch {private: false}` route is refused, as is a change to
+`state` below a sysadmin, `package_create` cannot store a public dataset, and
+`bulk_update_public` is covered by a chain of its own, which answers every
+caller directly because it does not call `next_auth`. Core itself refuses
+`member`, a cross-organization `editor` and anonymous callers before the wall
+runs. So no raw core call is a second, unrecorded door: the flow's own flip is
+the one write that bypasses the wall (`ignore_auth`), and it is the sanctioned
+door.
 
 They write the record and flip the value in one commit (D5) because
 `package_patch` commits the session it is handed. Measured against the CKAN
@@ -54,7 +55,6 @@ __all__ = [
     "publication_request_create",
     "publication_request_cancel",
     "publication_request_decide",
-    "publication_publish",
     "publication_request_list",
 ]
 
@@ -317,44 +317,6 @@ def publication_request_decide(context, data_dict):
 
     row.status = umss_model.APPROVED
     row.consumed_at = _now()
-    return _commit_row(row, context, flip=True)
-
-
-def publication_publish(context, data_dict):
-    """The sysadmin's recorded path: one row, born already decided and consumed.
-
-    A pending request for the same dataset is **annulled**, not cancelled: the
-    requester did not withdraw it, a direct action by the sysadmin made it moot —
-    which is what D2 added `annulled` for.
-
-    Publishing an already public dataset is refused by the auth function, the
-    way `publication_request_create` refuses one: the flip would be a no-op and
-    the caller would only be piling up identical `approved` rows (A2's review,
-    R3-003).
-    """
-    toolkit.check_access("publication_publish", context, data_dict)
-    dataset_id = _required(data_dict, "dataset_id")
-    _existing_dataset(dataset_id)
-
-    caller = caller_id(context)
-    now = _now()
-
-    moot = _pending_for(dataset_id)
-    if moot is not None:
-        moot.status = umss_model.ANNULLED
-        moot.decided_at = now
-        moot.motive = umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH
-
-    row = umss_model.PublicationRequest(
-        dataset_id=dataset_id,
-        requested_visibility="public",
-        status=umss_model.APPROVED,
-        requested_by=caller,
-        approved_by=caller,
-        comments=data_dict.get("comments"),
-        decided_at=now,
-        consumed_at=now,
-    )
     return _commit_row(row, context, flip=True)
 
 

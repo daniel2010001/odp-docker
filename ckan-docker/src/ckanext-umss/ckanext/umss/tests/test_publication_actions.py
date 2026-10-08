@@ -1,11 +1,16 @@
 """
-Tests for the five publication actions (`ckanext.umss.logic.action.publication`).
+Tests for the four publication actions (`ckanext.umss.logic.action.publication`).
 
-Design reference: `design.md` D4 (the five actions and who they are for) and D5
+Design reference: `design.md` D4 (the actions and who they are for) and D5
 (the door writes the record and flips the value in one transaction). These tests
 drive the actions through `logic.get_action`, which is the path the API
 controller takes, so they prove the actions are **registered**, not merely
 defined.
+
+Publication has exactly one route: `publication_request_create` ->
+`publication_request_decide {approve: true}`. The direct `publication_publish`
+action was retired, so the wall in `ckanext.umss.auth` refuses a stock flip by
+every caller, the sysadmin included.
 
 Phases A2.1–A2.5 landed together in this file's own commit: CKAN raises
 `ValueError('Authorization function not found: ...')` for an action with no auth
@@ -20,12 +25,12 @@ The contract these tests pin, for the portal that consumes it:
 | `publication_request_create` | `dataset_id`, `comments` (optional) | the row as a dict |
 | `publication_request_cancel` | `request_id` | the row as a dict |
 | `publication_request_decide` | `request_id`, `approve`, `comments` (optional) | the row as a dict |
-| `publication_publish` | `dataset_id`, `comments` (optional) | the row as a dict |
 | `publication_request_list` | `status` (optional) | a list of row dicts |
 
 `requested_by` and `approved_by` carry **user ids**, which is the convention the
 rest of CKAN follows (`package_show` answers `creator_user_id`, not a name).
 """
+import datetime
 import importlib.util
 from unittest import mock
 
@@ -153,26 +158,34 @@ def the_row(dataset_id):
 
 
 # ---------------------------------------------------------------------------
-# A2.1 — the surface: the five actions exist, are registered, and do what D4 says
+# A2.1 — the surface: the four actions exist, are registered, and do what D4 says
 # ---------------------------------------------------------------------------
 
 
-def test_the_five_actions_are_defined():
+def test_the_four_actions_are_defined():
     assert callable(actions.publication_request_create)
     assert callable(actions.publication_request_cancel)
     assert callable(actions.publication_request_decide)
-    assert callable(actions.publication_publish)
     assert callable(actions.publication_request_list)
 
 
-def test_the_plugin_registers_the_five_actions():
+def test_the_removed_publish_action_is_gone():
+    """The direct publish action was retired: it is neither defined nor
+    registered, so a caller of the old name gets CKAN's own
+    `KeyError("Action 'publication_publish' not found")` — the prelude to the
+    API's `400 Action name not known` — and never a plugin message."""
+    assert not hasattr(actions, "publication_publish")
+    with pytest.raises(KeyError):
+        toolkit.get_action("publication_publish")
+
+
+def test_the_plugin_registers_the_four_actions():
     """The deliverable: `logic.get_action` must resolve each name, which is what
     the API and the portal use."""
     for name in (
         "publication_request_create",
         "publication_request_cancel",
         "publication_request_decide",
-        "publication_publish",
         "publication_request_list",
     ):
         assert toolkit.get_action(name) is not None, name
@@ -337,57 +350,6 @@ def test_decide_approving_records_the_decision_and_flips_in_the_same_call(scene,
     assert stored(scene["dataset"]["id"])["private"] is False
 
 
-def test_publish_writes_and_consumes_the_row_in_the_act(scene, store):
-    """D4's sysadmin path: no queue, one row that is born already decided."""
-    sysadmin = factories.Sysadmin()
-    published = call_as(
-        sysadmin,
-        "publication_publish",
-        dataset_id=scene["dataset"]["id"],
-        comments="lo publico yo",
-    )
-
-    row = the_row(scene["dataset"]["id"])
-    assert published["status"] == "approved"
-    assert row.status == "approved"
-    assert row.requested_by == sysadmin["id"]
-    assert row.approved_by == sysadmin["id"]
-    assert row.decided_at is not None
-    assert row.consumed_at is not None
-    assert stored(scene["dataset"]["id"])["private"] is False
-
-
-def test_publish_annuls_a_pending_request_instead_of_leaving_it_open(scene, store):
-    """`annulled` is what D2 added it for, and it is not `cancelled`: the
-    requester did not withdraw it — a direct sysadmin action made it moot.
-
-    The pending row records **why** (`motive`), and the direct publish writes
-    **one** new row: the pending one is annulled, never turned into a second
-    `approved`."""
-    request_for(scene["editor"], scene["dataset"]["id"])
-
-    call_as(
-        factories.Sysadmin(),
-        "publication_publish",
-        dataset_id=scene["dataset"]["id"],
-    )
-
-    for_dataset = [r for r in rows() if r.dataset_id == scene["dataset"]["id"]]
-    statuses = sorted(r.status for r in for_dataset)
-    assert statuses == ["annulled", "approved"]
-    assert len(for_dataset) == 2
-
-    annulled = [r for r in for_dataset if r.status == umss_model.ANNULLED]
-    approved = [r for r in for_dataset if r.status == umss_model.APPROVED]
-    assert len(annulled) == 1
-    assert len(approved) == 1, "the direct publish must not write a second approval"
-    assert annulled[0].status != umss_model.CANCELLED
-    assert annulled[0].motive is not None
-    assert annulled[0].motive == umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH
-    assert annulled[0].decided_at is not None
-    assert stored(scene["dataset"]["id"])["private"] is False
-
-
 def test_list_filters_by_status(scene, store):
     rejected = call_as(
         scene["editor"], "publication_request_create", dataset_id=scene["dataset"]["id"]
@@ -419,7 +381,7 @@ def request_for(user, dataset_id):
 
 
 # ---------------------------------------------------------------------------
-# A2.3 — who may do each of the five (D4), written before the auth existed
+# A2.3 — who may do each of the four (D4), written before the auth existed
 #
 # These were RED together with the surface tests above, and deliberately so:
 # CKAN raises `ValueError('Authorization function not found: ...')` when an
@@ -438,48 +400,6 @@ def test_an_editor_cannot_decide(scene, store):
         approve=True,
     )
     assert the_row(scene["dataset"]["id"]).status == "pending"
-
-
-def test_an_editor_cannot_publish(scene, store):
-    refused(scene["editor"], "publication_publish", dataset_id=scene["dataset"]["id"])
-    assert stored(scene["dataset"]["id"])["private"] is True
-
-
-def test_an_org_admin_cannot_publish_directly(scene, store):
-    """The governance amendment. `publication_publish` is sysadmin-only; the
-    org admin keeps only the stock `package_patch {private: false}` route, which
-    the wall (`ckanext.umss.auth`) owns, not this action."""
-    with pytest.raises(toolkit.NotAuthorized) as excinfo:
-        call_as(
-            scene["admin"],
-            "publication_publish",
-            dataset_id=scene["dataset"]["id"],
-        )
-
-    assert auth_publication.NOT_A_SYSADMIN_LABEL + ": " in str(excinfo.value)
-    assert stored(scene["dataset"]["id"])["private"] is True
-    assert rows() == []
-
-
-def test_a_sysadmin_can_publish(scene, store):
-    """Positive control, not a discriminating test: this passes under the old
-    org-admin-grants-publish code too, because CKAN short-circuits a sysadmin to
-    success. It guards the amendment against over-narrowing — the action must
-    not be closed to a sysadmin — but the change itself is proven by
-    `test_an_org_admin_cannot_publish_directly`."""
-    sysadmin = factories.Sysadmin()
-    published = call_as(
-        sysadmin,
-        "publication_publish",
-        dataset_id=scene["dataset"]["id"],
-        comments="por el sysadmin",
-    )
-
-    row = the_row(scene["dataset"]["id"])
-    assert published["status"] == "approved"
-    assert row.requested_by == sysadmin["id"]
-    assert row.approved_by == sysadmin["id"]
-    assert stored(scene["dataset"]["id"])["private"] is False
 
 
 def test_a_member_cannot_create(scene, store):
@@ -502,33 +422,6 @@ def test_the_requester_can_cancel_their_own_request(scene, store):
         scene["editor"], "publication_request_cancel", request_id=created["id"]
     )
     assert cancelled["status"] == "cancelled"
-
-
-def test_an_org_admin_can_decide_but_not_publish(scene, store):
-    """The governance amendment narrows D4: an org admin still decides for
-    someone else, but `publication_publish` is no longer an org-admin authority.
-    The direct publish is a sysadmin's (`test_a_sysadmin_can_publish`)."""
-    created = request_for(scene["editor"], scene["dataset"]["id"])
-    decided = call_as(
-        scene["admin"], "publication_request_decide", request_id=created["id"], approve=True
-    )
-    assert decided["status"] == "approved"
-
-    with pytest.raises(toolkit.NotAuthorized):
-        call_as(
-            scene["admin"],
-            "publication_publish",
-            dataset_id=scene["second_dataset"]["id"],
-        )
-    assert stored(scene["second_dataset"]["id"])["private"] is True
-
-
-def test_an_admin_cannot_publish_in_an_organization_they_do_not_administer(scene, store):
-    """The capacity is per organization, which is the whole point of `owner_org`."""
-    refused(
-        scene["admin"], "publication_publish", dataset_id=scene["other_dataset"]["id"]
-    )
-    assert stored(scene["other_dataset"]["id"])["private"] is True
 
 
 @pytest.mark.ckan_config("ckan.roles_that_cascade_to_sub_groups", "admin")
@@ -608,7 +501,8 @@ def test_a_sysadmin_can_decide_someone_elses_request(scene, store):
 
 def test_a_sysadmin_cannot_decide_their_own_request(scene, store):
     """Four eyes has no sysadmin exception: the requester is refused even as a
-    sysadmin, whose sanctioned path is `publication_publish`."""
+    sysadmin. There is no direct-publish escape hatch any more, so the request
+    simply stays pending until someone else decides it."""
     sysadmin = factories.Sysadmin()
     created = request_for(sysadmin, scene["dataset"]["id"])
 
@@ -702,71 +596,19 @@ def test_create_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
     assert rows() == []
 
 
-def test_publish_refuses_an_unknown_dataset_and_writes_nothing(scene, store):
-    """The same hole lived in the other writing action."""
-    with pytest.raises(toolkit.ObjectNotFound):
-        call_as(
-            factories.Sysadmin(),
-            "publication_publish",
-            dataset_id="no-such-dataset",
-        )
-
-    assert rows() == []
-
-
-def test_a_non_sysadmin_gets_not_found_for_an_unknown_dataset(scene, store):
-    """Contract rule 7: an unresolvable `dataset_id` answers `NotFound`, not
-    `403` — for a non-sysadmin too. The auth function resolves the id first and
-    defers existence to the action; the capacity predicate narrows *who* may
-    publish, it does not pre-empt *whether the thing exists*."""
-    with pytest.raises(toolkit.ObjectNotFound):
-        call_as(
-            scene["admin"],
-            "publication_publish",
-            dataset_id="no-such-dataset",
-        )
-
-    assert rows() == []
-
-
-def test_publish_refuses_a_dataset_that_is_already_public(scene, store):
-    """A second direct publish of an already public dataset is refused by the
-    auth, the way `publication_request_create` refuses one: the flip would be a
-    no-op and the caller would only be piling up identical `approved` rows
-    (A2's review, R3-003). The caller here is the only one master lets through,
-    and `auth_sysadmins_check` is what makes the guard reachable for them."""
-    sysadmin = factories.Sysadmin()
-    call_as(sysadmin, "publication_publish", dataset_id=scene["second_dataset"]["id"])
-    before = len(rows())
+def test_create_refuses_a_dataset_that_is_already_public(scene, store):
+    """Re-pointed from the retired direct publish: the already-public guard
+    survives on `publication_request_create`, which refuses the no-op flip
+    instead of piling up an `approved` row for it (A2's review, R3-003)."""
+    public = factories.Dataset(owner_org=scene["org"]["id"], private=False)
 
     with pytest.raises(toolkit.NotAuthorized) as excinfo:
-        call_as(sysadmin, "publication_publish", dataset_id=scene["second_dataset"]["id"])
+        call_as(
+            scene["editor"], "publication_request_create", dataset_id=public["id"]
+        )
 
     assert auth_publication.ALREADY_PUBLIC_MSG in str(excinfo.value)
-    assert auth_publication.PUBLISH_DENIED_MSG not in str(excinfo.value)
-    assert len(rows()) == before
-
-
-def test_a_non_sysadmin_publishing_an_already_public_dataset_gets_the_sysadmin_denial(
-    scene, store
-):
-    """The order is capacity first, then state: a non-sysadmin is denied as a
-    non-sysadmin whatever the dataset's visibility. Answering
-    `ALREADY_PUBLIC_MSG` here would be a behaviour change against master for a
-    caller who was never allowed in — the governance amendment closed the
-    org-admin direct path, and the refusal text is part of that contract."""
-    sysadmin = factories.Sysadmin()
-    call_as(sysadmin, "publication_publish", dataset_id=scene["second_dataset"]["id"])
-
-    with pytest.raises(toolkit.NotAuthorized) as excinfo:
-        call_as(
-            scene["admin"],
-            "publication_publish",
-            dataset_id=scene["second_dataset"]["id"],
-        )
-
-    assert auth_publication.PUBLISH_DENIED_MSG in str(excinfo.value)
-    assert auth_publication.ALREADY_PUBLIC_MSG not in str(excinfo.value)
+    assert rows() == []
 
 
 def test_create_loses_the_race_by_returning_the_winners_row(scene, store, monkeypatch):
@@ -840,33 +682,16 @@ def test_a_failed_flip_on_decide_leaves_no_approved_row_behind(scene, store, fai
     assert stored(scene["dataset"]["id"])["private"] is True
 
 
-def test_a_failed_flip_on_publish_leaves_the_pending_request_untouched(
-    scene, store, failing_flip
-):
-    """The annulment of the pending request rolls back with the flip."""
-    request_for(scene["editor"], scene["dataset"]["id"])
-
-    with pytest.raises(toolkit.ValidationError):
-        call_as(
-            factories.Sysadmin(),
-            "publication_publish",
-            dataset_id=scene["dataset"]["id"],
-        )
-
-    row = the_row(scene["dataset"]["id"])
-    assert row.status == "pending"
-    assert stored(scene["dataset"]["id"])["private"] is True
-
-
 # ---------------------------------------------------------------------------
 # A2.6 / A2.7 — the decision re-checks the current state, and a pending request
 # whose object is gone is annulled
 #
-# A2.7 has exactly two triggers: the dataset deleted, or published by another
-# path. The requester losing capacity is **not** one of them: the decision is
-# refused as an authorization failure and the row stays `pending` (the author's
-# decision, 2026-10-07). `annulled` and `cancelled` stay distinct throughout:
-# the requester did not withdraw.
+# A2.7 has exactly two triggers, and both are historical now: the dataset was
+# deleted, or it was published by the retired direct-publish path. The requester
+# losing capacity is **not** one of them: the decision is refused as an
+# authorization failure and the row stays `pending` (the author's decision,
+# 2026-10-07). `annulled` and `cancelled` stay distinct throughout: the
+# requester did not withdraw.
 # ---------------------------------------------------------------------------
 
 
@@ -890,24 +715,24 @@ def test_the_motive_tokens_are_the_interface_values():
     )
 
 
-def test_the_nine_refusal_labels_are_the_interface_values():
-    """The nine refusal **labels** are the cross-repository interface values a
+def test_the_eight_refusal_labels_are_the_interface_values():
+    """The eight refusal **labels** are the cross-repository interface values a
     consumer matches on: the portal reads them from a single constant that
     points at `PUBLICATION-ACTIONS.md`, and CKAN gives no machine-readable code
     — an authorization failure is only `{"__type": "Authorization Error",
     "message": ...}` — so the label is the interface and the sentence after the
     colon is free prose.
 
-    This pin freezes the labels, not the sentences: rewording the prose after a
-    colon passes, changing a label fails. Breaking it means either a refusal the
-    portal knows arrives under a label it does not, or two different refusals
-    (in particular the two modules' `PUBLISH_DENIED_MSG`) can no longer be told
-    apart.
+    The direct-publish action was retired with its `Not a sysadmin` label, so
+    the surviving set is eight: six on this extension's own actions and the
+    wall's two.
 
-    All nine are asserted distinct here because that distinctness *is* the
-    interface: two constants called `PUBLISH_DENIED_MSG` in different modules
-    carried different texts, and a consumer keying on the name alone conflated
-    the wall's role denial with the action's sysadmin denial.
+    This pin freezes the labels, not the sentences: rewording the prose after a
+    colon passes, changing a label fails. Breaking it means a refusal the
+    portal knows arrives under a label it does not.
+
+    All eight are asserted distinct here because that distinctness *is* the
+    interface.
 
     A **pin, not a RED**: it passes against the constants as first written.
     """
@@ -915,7 +740,6 @@ def test_the_nine_refusal_labels_are_the_interface_values():
         auth_publication.FOUR_EYES_LABEL,
         auth_publication.REQUESTER_CAPACITY_LABEL,
         auth_publication.NOT_AN_APPROVER_LABEL,
-        auth_publication.NOT_A_SYSADMIN_LABEL,
         auth_publication.ALREADY_PUBLIC_LABEL,
         auth_publication.CANNOT_REQUEST_LABEL,
         auth_publication.CANNOT_CANCEL_LABEL,
@@ -928,7 +752,6 @@ def test_the_nine_refusal_labels_are_the_interface_values():
     assert auth_publication.FOUR_EYES_LABEL == "Four eyes"
     assert auth_publication.REQUESTER_CAPACITY_LABEL == "Requester capacity"
     assert auth_publication.NOT_AN_APPROVER_LABEL == "Not an approver"
-    assert auth_publication.NOT_A_SYSADMIN_LABEL == "Not a sysadmin"
     assert auth_publication.ALREADY_PUBLIC_LABEL == "Already public"
     assert auth_publication.CANNOT_REQUEST_LABEL == "Cannot request"
     assert auth_publication.CANNOT_CANCEL_LABEL == "Cannot cancel"
@@ -936,8 +759,8 @@ def test_the_nine_refusal_labels_are_the_interface_values():
     assert umss_auth.PUBLISH_DENIED_LABEL == "Publish denied"
 
     labels = action_labels + wall_labels
-    assert len(labels) == 9
-    assert len(set(labels)) == 9, labels
+    assert len(labels) == 8
+    assert len(set(labels)) == 8, labels
 
     messages = [
         (auth_publication.FOUR_EYES_LABEL, auth_publication.DECIDE_FOUR_EYES_MSG),
@@ -946,7 +769,6 @@ def test_the_nine_refusal_labels_are_the_interface_values():
             auth_publication.DECIDE_REQUESTER_CAPACITY_MSG,
         ),
         (auth_publication.NOT_AN_APPROVER_LABEL, auth_publication.DECIDE_DENIED_MSG),
-        (auth_publication.NOT_A_SYSADMIN_LABEL, auth_publication.PUBLISH_DENIED_MSG),
         (auth_publication.ALREADY_PUBLIC_LABEL, auth_publication.ALREADY_PUBLIC_MSG),
         (auth_publication.CANNOT_REQUEST_LABEL, auth_publication.REQUEST_DENIED_MSG),
         (auth_publication.CANNOT_CANCEL_LABEL, auth_publication.CANCEL_DENIED_MSG),
@@ -1021,7 +843,7 @@ def test_every_refusal_message_begins_with_a_declared_label():
     see inline strings, handler-local strings, `ValidationError` dict entries, or
     constants named otherwise, so it is a guard on the declared-message surface,
     not a proof about every string these modules emit. Within that surface it is
-    structural rather than a list of the nine known messages: a future refusal
+    structural rather than a list of the eight known messages: a future refusal
     declared with a label passes, one declared without fails, and a future label
     is picked up automatically from the module.
     """
@@ -1036,7 +858,7 @@ def test_every_refusal_message_begins_with_a_declared_label():
         for name, value in _declared_messages(module).items():
             seen += 1
             assert value.startswith(prefixes), (module.__name__, name, value)
-    assert seen >= 9, seen
+    assert seen >= 8, seen
 
 
 def test_the_refusal_labels_are_not_translated():
@@ -1101,22 +923,6 @@ def test_the_translation_guardian_can_fail():
 
     assert not label_inside.startswith(label + ": ")
     assert label_outside.startswith(label + ": ")
-
-
-def test_the_action_denial_has_its_own_label():
-    """This module's own `PUBLISH_DENIED_MSG` — the `publication_publish`
-    action's sysadmin denial — carries `Not a sysadmin`, distinct from the
-    wall's `Publish denied` for its own `PUBLISH_DENIED_MSG` in
-    `ckanext.umss.auth`. The two constants share a name and differ in text; the
-    labels are what make them separable by the consumer without reading the
-    module.
-
-    A **pin, not a RED**: it passes against the constant as first written.
-    """
-    assert auth_publication.PUBLISH_DENIED_MSG.startswith(
-        auth_publication.NOT_A_SYSADMIN_LABEL + ": "
-    )
-    assert auth_publication.NOT_A_SYSADMIN_LABEL != umss_auth.PUBLISH_DENIED_LABEL
 
 
 def test_decide_re_checks_the_owning_organization_at_decision_time(scene, store):
@@ -1206,14 +1012,14 @@ def test_a_sysadmin_approver_is_also_refused_when_the_requester_lost_capacity(
     scene, store
 ):
     """The requester-capacity rule has no sysadmin exception, for the same
-    reason four eyes has none: a sysadmin's sanctioned alternative is
-    `publication_publish`, which annuls the pending row and publishes in the
-    act. Without this, the rule would be written, green and hollow for a
-    sysadmin approver — the function carries `auth_sysadmins_check`, so the
-    check must sit before the sysadmin short-circuit.
+    reason four eyes has none. Without this, the rule would be written, green
+    and hollow for a sysadmin approver — the function carries
+    `auth_sysadmins_check`, so the check must sit before the sysadmin
+    short-circuit.
 
     Discriminating: the sysadmin short-circuit would otherwise return success
-    before the rule ran.
+    before the rule ran. There is no direct-publish escape hatch any more, so
+    the request cannot be rescued by anyone either.
     """
     created = request_for(scene["editor"], scene["dataset"]["id"])
 
@@ -1236,8 +1042,9 @@ def test_a_sysadmin_approver_is_also_refused_when_the_requester_lost_capacity(
 
 def test_decide_fails_closed_when_the_requester_cannot_be_resolved(scene, store):
     """Triangulation of the requester half: an unresolvable requester (a
-    deleted user) fails closed. `requested_by` holds a user id; the escape
-    hatch is the sysadmin's `publication_publish`, not an open decision."""
+    deleted user) fails closed. `requested_by` holds a user id, and there is no
+    direct-publish escape hatch any more: the request stays `pending` rather
+    than being decided."""
     created = request_for(scene["editor"], scene["dataset"]["id"])
     the_row(scene["dataset"]["id"]).requested_by = "deleted-user-id"
     ckan_model.Session.commit()
@@ -1387,7 +1194,7 @@ def measured(call):
 
 
 def test_every_action_returns_rows_carrying_both_presentation_names(scene, store):
-    """The five faces answer the same shape: the row, with both name keys. A
+    """The four faces answer the same shape: the row, with both name keys. A
     consumer must never branch on which action produced the row."""
     editor = scene["editor"]
     admin = scene["admin"]
@@ -1417,13 +1224,6 @@ def test_every_action_returns_rows_carrying_both_presentation_names(scene, store
         approve=True,
     )
     assert_names_present(approved)
-
-    published = call_as(
-        factories.Sysadmin(),
-        "publication_publish",
-        dataset_id=fresh_dataset(scene)["id"],
-    )
-    assert_names_present(published)
 
     listed = call_as(admin, "publication_request_list")
     assert listed
@@ -1460,7 +1260,7 @@ def dataset_resolution_selects(statements):
 
 def test_every_action_returns_rows_carrying_both_dataset_titles(scene, store):
     """The portal's queue reads a dataset by its **title** and needs the
-    organisation to locate the request, so all five faces answer the same two
+    organisation to locate the request, so all four faces answer the same two
     additive keys: `dataset_title` and `organization_title`."""
     editor = scene["editor"]
     admin = scene["admin"]
@@ -1490,13 +1290,6 @@ def test_every_action_returns_rows_carrying_both_dataset_titles(scene, store):
         approve=True,
     )
     assert_titles_present(approved)
-
-    published = call_as(
-        factories.Sysadmin(),
-        "publication_publish",
-        dataset_id=fresh_dataset(scene)["id"],
-    )
-    assert_titles_present(published)
 
     listed = call_as(admin, "publication_request_list")
     assert listed
@@ -1691,12 +1484,16 @@ def test_approved_by_name_is_none_when_there_was_no_decision(scene, store):
     assert cancelled_row["approved_by_name"] is None
     assert cancelled_row["requested_by_name"] == editor["name"]
 
+    # `annulled` used to be produced by the retired `publication_publish`; no
+    # action writes that motive any more, so the historical row is built at the
+    # model layer. The presentation invariant under test is unchanged: an
+    # annulled row carries no decision, so `approved_by` is empty.
     annulled = request_for(editor, scene["second_dataset"]["id"])
-    call_as(
-        factories.Sysadmin(),
-        "publication_publish",
-        dataset_id=scene["second_dataset"]["id"],
-    )
+    historical = the_row(scene["second_dataset"]["id"])
+    historical.status = umss_model.ANNULLED
+    historical.motive = umss_model.MOTIVE_PUBLISHED_BY_ANOTHER_PATH
+    historical.decided_at = datetime.datetime.now()
+    ckan_model.Session.commit()
 
     listed = call_as(admin, "publication_request_list")
     annulled_rows = [row for row in listed if row["id"] == annulled["id"]]

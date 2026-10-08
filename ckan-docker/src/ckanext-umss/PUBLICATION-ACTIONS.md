@@ -1,6 +1,6 @@
-# The contract of the five publication actions
+# The contract of the four publication actions
 
-This file exists because the five actions are consumed by **another session, in another repository**
+This file exists because the four actions are consumed by **another session, in another repository**
 (`odp`, the portal), and that contract was living only in cross-session messages — a channel that
 returns `accepted for delivery`, which is **not** a read receipt. Over one day the same point was
 decided four times, each time by whichever message happened to arrive last. The shape is written here
@@ -11,10 +11,12 @@ once so both sides read it from the same place.
 | | |
 |---|---|
 | The five actions **as delivered** (`unit/a2-governance`, range `63ec806..HEAD`) | implement the governance amendment: `publication_publish` is `sysadmin`-only, `publication_decide` carries the four-eyes and current-capacity re-checks, a lost object is `annulled`, and the returned rows carry `requested_by_name` / `approved_by_name` |
+| *(Superseded 2026-10-08)* | The row above describes the **five-action** shape as delivered on 2026-10-07. The author's decision of **2026-10-08** retires `publication_publish` outright and closes the `sysadmin`'s stock route as well: **four actions**, and no caller publishes directly. See the `unit/no-direct-publish` row below. |
 | The advisory corrections carried on top (`unit/a2-advisories-v2`) | the branch carries the **eight** advisory findings of A2's first review; **two of them are contract-visible** and are the ones reflected below, both **measured** by the suite: `publication_request_list` resolves every dataset's owner org in **one** query and evaluates the capacity **once per organisation** (behaviour unchanged — it narrows to the same rows — only the helper changed, and the old `_may_see` is gone); and `publication_publish` refuses an **already public** dataset |
-| **This file describes** | the contract of `unit/a2-governance`, which is **delivered and natively reviewed**, plus the two contract-visible advisory corrections of `unit/a2-advisories-v2`, plus the `A3` wall (`unit/a3-wall`), **merged to `master`**: its refusal of the stock `package_patch {private: false}` route, any `state` change, a public `package_create`, and `bulk_update_public` |
+| **This file describes** | the contract of `unit/a2-governance`, which is **delivered and natively reviewed**, plus the two contract-visible advisory corrections of `unit/a2-advisories-v2`, plus the `A3` wall (`unit/a3-wall`), **merged to `master`**: its refusal of the stock `package_patch {private: false}` route, any `state` change, a public `package_create`, and `bulk_update_public` — and, since 2026-10-08, the closure of the `sysadmin`'s own route through that wall |
+| **`unit/no-direct-publish`** (2026-10-08) | **the author's decision that no caller publishes directly, the `sysadmin` included.** `publication_publish` is **retired from the registry** — a caller of that name gets CKAN's own `400 "Bad request: Action name not known"`, which is the form the author chose over a tombstone that refuses forever; the wall declares `auth_sysadmins_check` on **all three** functions, so it **runs for a `sysadmin`** and refuses the visibility transition for them too, while `state` administration stays the `sysadmin`'s **deliberately** (closing it was never asked for). **Four actions, eight labels.** The label *values* do not change; the **message** is now chosen by fact — a caller the flow authorizes (org `admin` **or** `sysadmin`) reads `Publication flow`, everyone else `Publish denied` — and `Publish denied`'s sentence was corrected, because "only an organization administrator can publish a dataset" became false |
 | **`unit/titles-and-labels`** | **delivered and merged** to `master` in the PR #4 (`02893f7`), natively reviewed (`review-6a40aaa7e5a3b385`, tier high, 4/4 lenses, approved and acknowledged, authority burned; 3 informational findings) and CI green (run `37705879038`): the returned rows also carry `dataset_title` / `organization_title` (resolved in the same single query as the owner organisation, with the names' `None` / `"unknown"` fallbacks), and every refusal below reads `<frozen label>: <free prose>` with the labels declared as constants and pinned by test |
-| **`unit/labels-outside-translation`** | the label of every refusal is now composed **outside** `toolkit._(...)`, so the part a consumer matches no longer sits inside a translatable unit; the wall's two sentences stay translated. The nine label **values** are unchanged. Guarded by a **structural** test, because the defect is invisible to behaviour — see *What is translated, and what is matched* below |
+| **`unit/labels-outside-translation`** | the label of every refusal is now composed **outside** `toolkit._(...)`, so the part a consumer matches no longer sits inside a translatable unit; the wall's two sentences stay translated. The label **values** are unchanged (nine at the time; **eight** since 2026-10-08, when the retired action's `Not a sysadmin` went with it). Guarded by a **structural** test, because the defect is invisible to behaviour — see *What is translated, and what is matched* below |
 | The review of record (**relayed**) | lineage `review-4b6ecc112fa966fa`, tier **high**, **4/4 lenses**, **approved and acknowledged**; the review authority is burned; the **9 findings are informational**, none blocking, none reopening the lineage, and they are declared as later work at the end of this file. This metadata is **relayed** from the provider's review envelope and from the state file read before acknowledgement — it is **not reproducible from the repository now** |
 | The governance amendment | `odp` commit `41de6c2`, `design.md:194,207` and `spec.md:284,586` |
 | The unit's state and what it must carry | `HANDOFF-2026-10-07.md` (tracked, repository root) |
@@ -47,27 +49,30 @@ measured, an anonymous `POST` to the action returned the wall's `PUBLISH_DENIED_
 the text is core's.
 
 **The wall has landed (`A3`).** An organization `admin` can no longer approve their own request or
-publish through the five actions, **and** the stock `package_patch {private: false}` route is now
-refused by the wall, as is any change to a dataset's `state`; so is a public `package_create`, and the
+publish through the **four** actions, **and** the stock `package_patch {private: false}` route is now
+refused by the wall — as is any change to a dataset's `state` **below a sysadmin** (`state`
+administration stays the `sysadmin`'s, deliberately). So is a public `package_create`, and the
 `bulk_update_public` action carries a refusal chain of its own. With the wall closed, the guarantee
-holds for the five actions **and** for a raw core call by any caller below a sysadmin; the sysadmin's
-own stock bypass remains. *(This supersedes the earlier "what is not yet closed is the wall" wording.)*
+holds for the **four** actions **and** for a raw core call by **any** caller; **the `sysadmin`'s own
+stock bypass is closed too**: all three wall functions declare `auth_sysadmins_check`, so the wall runs
+for them and refuses the visibility transition. *(This supersedes the earlier "what is not yet closed is
+the wall" wording and the 2026-10-07 "the sysadmin's own stock bypass remains".)*
 The bypasses that remain are named individually under *Named bypasses* below.
 
-## The five actions
+## The four actions
 
 | Action | Arguments | Returns | Authorized to |
 |---|---|---|---|
 | `publication_request_create` | `dataset_id`, `comments?` | the row | a caller who can `update_dataset` in the owning org, on a **private** dataset. Idempotent: answers the existing `pending` row |
 | `publication_request_cancel` | `request_id` | the row | the requester, or an org `admin` |
 | `publication_request_decide` | `request_id`, `approve` (bool), `comments?` | the row | an `admin` of the owning org, an `admin` of a **parent** org, or a `sysadmin` — **never the requester** |
-| `publication_publish` | `dataset_id`, `comments?` | the row | **`sysadmin` only**, and only on a **private** dataset. An already public dataset is refused (`403`, `"Already public: that dataset is already public"`) instead of accumulating a second `approved` row — the same guard `publication_request_create` applies. Capacity is checked **before** state, so a non-sysadmin gets the sysadmin denial whatever the dataset's visibility: its `403` text does not change with the dataset (measured: `test_publish_refuses_a_dataset_that_is_already_public` for the sysadmin, `test_a_non_sysadmin_publishing_an_already_public_dataset_gets_the_sysadmin_denial` for the non-sysadmin) |
 | `publication_request_list` | `status?` | a list of rows | **any caller may invoke it**: the auth function returns `success: True` unconditionally, and the **action body** narrows the result to what the caller may see (`_datasets_by_id` resolves every dataset's owner org and both titles in one query, the `update_dataset` capacity is evaluated once per organisation, plus the caller's own rows). An anonymous caller is **not** refused before the auth function runs (the same mechanism as rule 7): measured, an anonymous call reached the body and returned a `500` because the dev database has no store table, not a `403` |
 
 ## The rules that are not visible in the names
 
-1. **The return is uniform: the row, and nothing else.** `publication_publish` and
-   `decide {approve: true}` do **not** carry the dataset. A consumer that needs the dataset's new value
+1. **The return is uniform: the row, and nothing else.** `decide {approve: true}` does **not** carry
+   the dataset (the retired `publication_publish` also wrote it; it is gone). A consumer that needs the
+   dataset's new value
    **re-reads it** — that verifies the effect at the source instead of trusting the response of the
    action that wrote it. Decided in favour of the uniform shape over an additive `dataset` key, and it
    is final: **the shape does not change after a consumer is wired.**
@@ -122,7 +127,8 @@ The bypasses that remain are named individually under *Named bypasses* below.
    an orphan row for a dataset that does not exist.
 
    **Measured, and anonymous callers are inside the rule.** An earlier draft of this file claimed the
-   opposite — that `publication_publish` carries no `auth_allow_anonymous_access`, so CKAN would refuse
+   opposite — that `publication_publish` (retired on 2026-10-08, so the transcript below measures the
+   build as it stood then) carries no `auth_allow_anonymous_access`, so CKAN would refuse
    an anonymous caller before the auth function ran and they would get a `403` instead of `NotFound`.
    That claim was **wrong**. Re-measured against the running dev stack on **2026-10-07** (the dev
    server bind-mounts this working tree, so it served the labelled message), anonymous, no
@@ -142,8 +148,11 @@ The bypasses that remain are named individually under *Named bypasses* below.
        "message":"Access denied: Not a sysadmin: only a sysadmin may publish a dataset directly"}
    ```
 
-   So the auth function **does** run for an anonymous caller and its `NotFound` path is reachable; the
-   refusal on a valid id is the action's own message (`PUBLISH_DENIED_MSG`), not a generic "requires an
+   So the auth function **does** run for an anonymous caller and its `NotFound` path is reachable — the
+   property rule 7 rests on, carried today by the create path's own test
+   (`test_create_refuses_an_unknown_dataset_and_writes_nothing`). The transcript stays as the record of
+   the retired action's build: its refusal on a valid id was that action's own message, not a generic
+   "requires an
    authenticated user". Core's early anonymous denial (`ckan/authz.py:235`) only fires when
    `not context.get('auth_user_obj')`; on the API path `ckan/views/api.py:247` sets
    `context['auth_user_obj'] = current_user`, and `login_manager.anonymous_user =
@@ -157,16 +166,20 @@ The bypasses that remain are named individually under *Named bypasses* below.
 
 Publication is refused with one of **three** texts, two of them in the wall:
 
-- the wall in `ckanext.umss.auth` answers the label `Publication flow` (`PUBLISH_VIA_FLOW_MSG`) to an
-  **approver** — the organization `admin` the flow authorizes — on the stock `package_update` path it
+- the wall in `ckanext.umss.auth` answers the label `Publication flow` (`PUBLISH_VIA_FLOW_MSG`) to a
+  caller the flow authorizes — the organization `admin` of the owning organization, **or a `sysadmin`**
+  — on the stock `package_update` path it
   chains onto;
 - the same wall answers the label `Publish denied` (`PUBLISH_DENIED_MSG`) to a caller core admits
   whose request the approver predicate rejects — in practice an organization `editor`. Callers core
   refuses first (`member`, a cross-organization `editor`, an anonymous caller) never reach the wall on
-  that path, and `bulk_update_public` answers every authenticated non-sysadmin that reaches it,
+  that path, and `bulk_update_public` answers every caller that reaches it, the `sysadmin` included,
   because its chain does not call `next_auth`;
-- the `publication_publish` action answers the label `Not a sysadmin` (its own `PUBLISH_DENIED_MSG`;
-  the two modules name a constant the same way, which is exactly why the labels differ).
+- since 2026-10-08 the first bullet above covers the `sysadmin` too: the wall declares
+  `auth_sysadmins_check`, so it runs for them and the same `Publication flow` label reaches a
+  `sysadmin` who attempts a direct publish. The third bullet this list used to carry — the retired
+  action's own `Not a sysadmin` — is **gone with the action**, and with it the name collision that had
+  made the labels the way to tell those two denials apart.
 
 The claim this section used to carry — that an organization `admin` may still use the stock
 `package_patch {private: false}` route (the wall's door) — is **false as of `A3`**: that route is
@@ -189,7 +202,7 @@ own, so improving our wording can no longer break the portal. The portal reads t
 constant that points at this file — the pointer is **relayed** from the consuming session, not
 reproducible here. That single pointer is what makes this file the one place that can go stale: a
 label reworded here, or restated here and no longer matching the code, breaks the consumer's ability
-to distinguish the refusal, and nothing in this repository fails. That is why the nine **labels**
+to distinguish the refusal, and nothing in this repository fails. That is why the eight **labels**
 below — not their sentences — and the `comments` key of the missing-comment rejection (which is
 machine-readable without matching prose) are **pinned by test** (`tests/test_auth.py`,
 `tests/test_publication_actions.py`) rather than trusted to review: a reworded sentence does **not**
@@ -207,36 +220,33 @@ illustrative prose.
 | `Four eyes` | `logic/auth/publication.py` | `"Four eyes: the approver cannot be the requester of the request they decide"` | `publication_request_decide` is called by the request's own requester who **has** the admin capacity the decision demands — for an org `admin` **and** for a `sysadmin`, which has no exception. The row stays `pending` |
 | `Requester capacity` | `logic/auth/publication.py` | `"Requester capacity: the requester can no longer update this dataset, so the request cannot be decided"` | the requester's **current** capacity on the dataset's **current** owner is gone; checked **before** four eyes and before the sysadmin branch, so it has no sysadmin exception either |
 | `Not an approver` | `logic/auth/publication.py` | `"Not an approver: only an organization administrator may decide a publication request"` | the caller is not an org `admin` (owning or parent) and not a `sysadmin`; for a non-sysadmin this branch runs **before** the four-eyes branch |
-| `Not a sysadmin` | `logic/auth/publication.py` | `"Not a sysadmin: only a sysadmin may publish a dataset directly"` | `publication_publish` is called by **any non-sysadmin**; the capacity predicate runs before the state one, so the same label covers a non-sysadmin on an already-public dataset too (measured: `test_a_non_sysadmin_publishing_an_already_public_dataset_gets_the_sysadmin_denial`) |
-| `Already public` | `logic/auth/publication.py` | `"Already public: that dataset is already public"` | `publication_request_create` on an already-public dataset, and the sysadmin's `publication_publish` on one — the flip would be a no-op and the caller would only pile up `approved` rows |
+| `Already public` | `logic/auth/publication.py` | `"Already public: that dataset is already public"` | `publication_request_create` on an already-public dataset — the flip would be a no-op and the caller would only pile up `approved` rows |
 | `Cannot request` | `logic/auth/publication.py` | `"Cannot request: only a user who can update this dataset may ask for it to be published"` | `publication_request_create` is called by a caller who cannot `update_dataset` in the dataset's owning organisation |
 | `Cannot cancel` | `logic/auth/publication.py` | `"Cannot cancel: only the requester or an organization administrator may cancel this request"` | `publication_request_cancel` is called by neither the requester nor an org `admin` |
-| `Publication flow` | `auth.py` (the wall) | `"Publication flow: publication goes through the publication flow, not package_patch"` | an **approver** — the org `admin` the flow authorizes — attempts the stock `package_update` route (`package_patch`, `package_update`, a public `package_create`, `bulk_update_public`) |
-| `Publish denied` | `auth.py` (the wall) | `"Publish denied: only an organization administrator can publish a dataset"` | a caller **core admits** whose request the approver predicate rejects — in practice an organization `editor` — attempts the same stock route |
+| `Publication flow` | `auth.py` (the wall) | `"Publication flow: publication goes through the publication flow, not package_patch"` | a caller the flow authorizes — the org `admin` of the owning organization, **or a `sysadmin`** — attempts the stock `package_update` route (`package_patch`, `package_update`, a public `package_create`, `bulk_update_public`) |
+| `Publish denied` | `auth.py` (the wall) | `"Publish denied: only an organization administrator can decide a publication request"` | a caller **core admits** who is not one the flow authorizes — in practice an organization `editor` — attempts the same stock route. The **sentence** was corrected on 2026-10-08 because "only an organization administrator can publish a dataset" became false; the **label** did not change |
 
-The table went from **six rows to nine**. Three rows are new: **`Not an approver`** (the decide
-path's third refusal, which the earlier contract left unseparated), and **`Cannot request` /
-`Cannot cancel`** (the create and cancel refusals, which carried plain sentences with no label at
-all). The row the earlier contract carried for the `publication_publish` action's own
-`PUBLISH_DENIED_MSG` stays — but now it carries `Not a sysadmin`, so the **name collision is
-resolvable by label**: two constants called `PUBLISH_DENIED_MSG` in different modules (`auth.py` and
-`logic/auth/publication.py`) hold different texts, and a consumer that keyed on the name alone
-conflated the wall's role denial with the action's sysadmin denial. A consumer must read the label,
-not the module.
+The table went from **six rows to nine**, and now stands at **eight**: the retired action's own row
+(`Not a sysadmin`) is **gone with the action** (2026-10-08), and with it goes the **name collision** —
+two constants called `PUBLISH_DENIED_MSG` in different modules — that had made the labels the only way
+to tell the wall's role denial and the action's sysadmin denial apart. Three of the rows above are the
+ones the six-row contract lacked: **`Not an approver`** (the decide path's third refusal, which the
+earlier contract left unseparated), and **`Cannot request` / `Cannot cancel`** (the create and cancel
+refusals, which carried plain sentences with no label at all).
 
 Two notes on scope, so the table is not read as more than it is. On the `package_update` chain the
 wall's two labels reach only callers core admits: a `member`, a cross-organization `editor` and an
 anonymous caller are refused by core before the chain runs, so they keep core's own `403` text.
 `bulk_update_public` is the exception — its chain does not call `next_auth`, so it owns the refusal
-and answers every authenticated non-sysadmin that reaches it, core-admitted or not. Every other
+and answers every caller that reaches it, the `sysadmin` included, core-admitted or not. Every other
 `403` refusal the two modules **declare as a module-level message constant** is a row above; the
 invariant test keeps that true for that surface, and the `409` refusals are the separate class below.
 
 ### What is translated, and what is matched
 
 **The property: what a human reads is translated; what a consumer matches is not.** In the wall the
-label is composed **outside** `toolkit._(...)` and the sentence inside it; the seven messages of
-`logic/auth/publication.py` compose both outside any translator. The nine label **values** are identical
+label is composed **outside** `toolkit._(...)` and the sentence inside it; the six messages of
+`logic/auth/publication.py` compose both outside any translator. The eight label **values** are identical
 before and after — what this unit moved is the boundary of the translatable unit.
 
 Three facts, measured on the running stack (`babel 2.18.0`, CKAN 2.12.0) while this unit was written, are
@@ -308,11 +318,11 @@ refresh. The key is the part a consumer branches on; the sentence inside it is p
 reworded.
 
 **The governance rule: the trigger to design a machine-readable token is the second consumer
-branch, not the second message.** Counted as labels there are already **nine**; counted as places
+branch, not the second message.** Counted as labels there are already **eight**; counted as places
 where the consumer must **change behaviour** there is exactly **one** — four eyes, where the refusal
 means "you cannot decide your own request" and the portal must route elsewhere rather than merely
 display the text. One case is an exception, two cases are a shape; the day a second branch appears,
-the token is designed **before** the branch is wired, not after. Until then the nine labels stay
+the token is designed **before** the branch is wired, not after. Until then the eight labels stay
 pinned text, and this file stays the single point the consumer's constant points at.
 
 **The precedence of the three decide-path labels is measured, not asserted.** The decide path alone
@@ -327,7 +337,7 @@ capacity the decision demands; a requester who lost it answers `Requester capaci
 discriminates with it elsewhere — **relayed**: it is the consuming repository, not this one — so an
 own error type would cost less on the consumer side than it looks, because part of the reader for it
 already exists. That changes the **price** of the future decision; it does not make the decision
-today. The contract above stands: nine pinned labels, one single pointer, and the second branch as
+today. The contract above stands: eight pinned labels, one single pointer, and the second branch as
 the trigger.
 
 ### Named bypasses
@@ -350,8 +360,9 @@ running CKAN 2.12.0 (`/srv/app/src/ckan`, `0058b2eb…`) or marked as **relayed*
   `_bulk_update_dataset(..., {'state': 'deleted'})`, which loops `package_patch`; the wall now refuses
   an organization `admin`'s `state` change, so that admin's delete is refused before it removes the
   dataset and no `pending` row survives it. The bypass that remains is the **`sysadmin`'s own**
-  `bulk_update_delete`, which the wall leaves to the stock bypass (none of its chains sets
-  `auth_sysadmins_check`): a sysadmin delete still leaves the row behind, as for `dataset_purge`. The
+  `bulk_update_delete`: since 2026-10-08 the wall *does* declare `auth_sysadmins_check`, but a `state`
+  change is deliberately **preserved** for a `sysadmin` (it is not publishing), so a sysadmin delete
+  still leaves the row behind, as for `dataset_purge`. The
   entry stays named rather than deleted because that sysadmin path is real.
 - **A soft-deleted user still resolves.** `model.User.get` filters on `name` or `id`, not on `state`,
   so a soft-deleted user row is still returned. The decision's fail-closed path therefore triggers on
@@ -376,19 +387,22 @@ running CKAN 2.12.0 (`/srv/app/src/ckan`, `0058b2eb…`) or marked as **relayed*
   It is unreachable today **only** because `ckan.auth.create_unowned_dataset = false` in `ckan.ini`; if
   that config is enabled it becomes a real publication path. This is the one entry here that is a
   genuine, reachable gap rather than an intended exception.
-- **The two sanctioned doors bypass the wall by design.** `publication_request_decide {approve: true}`
-  and `publication_publish` both write through `package_patch` with `ignore_auth`, which
-  `authz.is_authorized` short-circuits before consulting any registered auth function
-  (`ckan/authz.py:210-213`). They are the only paths meant to publish; the wall refusing them would
-  make the publication flow impossible. Design, not a gap.
+- **The one sanctioned door bypasses the wall by design.** `publication_request_decide {approve: true}`
+  writes through `package_patch` with `ignore_auth`, which `authz.is_authorized` short-circuits before
+  consulting any registered auth function (`ckan/authz.py:210-213`). It is the only path meant to
+  publish, and since 2026-10-08 it is the **only** one at all: `publication_publish` was the second and
+  is retired. The wall refusing this door would make the publication flow impossible. Design, not a gap.
 
 ## The four governance deltas this unit carries
 
 From `odp` `41de6c2`:
 
-1. `publication_publish` is `sysadmin`-only; an org `admin` has **no direct publish path through the
-   five actions**. The stock `package_patch {private: false}` route is no longer open to an
-   organization `admin` either: the wall (`A3`) refuses it, as it does any `state` change.
+1. **As delivered:** `publication_publish` is `sysadmin`-only; an org `admin` has **no direct publish
+   path through the five actions**. The stock `package_patch {private: false}` route is no longer open
+   to an organization `admin` either: the wall (`A3`) refuses it, as it does any `state` change.
+   **Superseded 2026-10-08:** the action is retired and the `sysadmin`'s stock route is closed too —
+   **no caller publishes directly**, and `state` administration (not a publication) stays the
+   `sysadmin`'s, deliberately.
 2. `decide` is four-eyes: an org `admin` (owning or parent) or a `sysadmin`, **never the requester**.
 3. `comments` is required when rejecting.
 4. The decision **re-checks the current state** — the dataset's current owner and the requester's
