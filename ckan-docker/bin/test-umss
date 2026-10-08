@@ -82,13 +82,16 @@ import json, sys, urllib.request, urllib.error
 
 solr, core = sys.argv[1], sys.argv[2]
 base = solr.rsplit("/solr/", 1)[0]
-with urllib.request.urlopen(base + "/solr/admin/cores?action=STATUS") as r:
+# `timeout` no es decorativo: sin él, un Solr que acepta la conexión y no contesta
+# deja al runner colgado para siempre, y el síntoma (una suite que nunca termina)
+# no dice nada sobre la causa.
+with urllib.request.urlopen(base + "/solr/admin/cores?action=STATUS", timeout=10) as r:
     if core in json.load(r).get("status", {}):
         sys.exit(0)
 url = (base + "/solr/admin/cores?action=CREATE&name=" + core +
        "&configSet=/opt/solr/server/solr/configsets/ckan")
 try:
-    with urllib.request.urlopen(url) as r:
+    with urllib.request.urlopen(url, timeout=30) as r:
         print("test-umss: core creado:", json.load(r))
 except urllib.error.HTTPError as e:
     print("test-umss: no pude crear el core %s: %s" % (core, e.read().decode()[:300]), file=sys.stderr)

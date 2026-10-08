@@ -686,8 +686,10 @@ def test_a_failed_flip_on_decide_leaves_no_approved_row_behind(scene, store, fai
 # A2.6 / A2.7 — the decision re-checks the current state, and a pending request
 # whose object is gone is annulled
 #
-# A2.7 has exactly two triggers, and both are historical now: the dataset was
-# deleted, or it was published by the retired direct-publish path. The requester
+# A2.7 has exactly two triggers, and **one of them is still live**: the dataset was
+# deleted, which the `after_dataset_delete` hook still annuls and which the test
+# below exercises end to end. The other is historical: it was published by the
+# retired direct-publish path, so nothing writes that motive any more. The requester
 # losing capacity is **not** one of them: the decision is refused as an
 # authorization failure and the row stays `pending` (the author's decision,
 # 2026-10-07). `annulled` and `cancelled` stay distinct throughout: the
