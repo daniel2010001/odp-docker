@@ -90,7 +90,7 @@ ckan-docker-datapusher-1   ckan/ckan-base-datapusher:0.0.20   "sh -c 'uwsgi --pl
 ckan-docker-db-1           ckan-docker-db                     "docker-entrypoint.s…"   db           4 minutes ago   Up 4 minutes (healthy)
 ckan-docker-nginx-1        ckan-docker-nginx                  "/bin/sh -c 'openssl…"   nginx        4 minutes ago   Up 2 minutes             80/tcp, 0.0.0.0:8443->443/tcp
 ckan-docker-redis-1        redis:6                            "docker-entrypoint.s…"   redis        4 minutes ago   Up 4 minutes (healthy)
-ckan-docker-solr-1         ckan/ckan-solr:2.10-solr9          "docker-entrypoint.s…"   solr         4 minutes ago   Up 4 minutes (healthy)
+ckan-docker-solr-1         ckan/ckan-solr:2.12-solr9          "docker-entrypoint.s…"   solr         4 minutes ago   Up 4 minutes (healthy)
 ```
 
 After this step, CKAN should be running at `CKAN_SITE_URL` (by default https://localhost:8443)
@@ -258,7 +258,7 @@ The CKAN base images are built from https://github.com/ckan/ckan-docker-base/
 
 You can modify the docker files to build your own customized image tailored to your project, installing any extensions and extra requirements needed. For example here is where you would update to use a different CKAN base image ie: `ckan/ckan-base:<new version>`
 
-To perform extra initialization steps you can add scripts to your custom images and copy them to the `/docker-entrypoint.d` folder (The folder should be created for you when you build the image). Any `*.sh` and `*.py` file in that folder will be executed just after the main initialization script ([`prerun.py`](https://github.com/ckan/ckan-docker-base/blob/main/ckan-2.9/base/setup/prerun.py)) is executed and just before the web server and supervisor processes are started.
+To perform extra initialization steps you can add scripts to your custom images and copy them to the `/docker-entrypoint.d` folder (The folder should be created for you when you build the image). Any `*.sh` and `*.py` file in that folder will be executed just after the main initialization script ([`prerun.py`](https://github.com/ckan/ckan-docker-base), in the base image's `ckan-<version>/base/setup/` directory) is executed and just before the web server and supervisor processes are started.
 
 For instance, consider the following custom image:
 
@@ -283,7 +283,7 @@ ckan -c /srv/app/ckan.ini validation init-db
 And then in our `Dockerfile.dev` file we install the extension and copy the initialization scripts:
 
 ```Dockerfile
-FROM ckan/ckan-base:2.9.7-dev
+FROM ckan/ckan-base:2.12
 
 RUN pip install -e git+https://github.com/frictionlessdata/ckanext-validation.git#egg=ckanext-validation && \
     pip install -r https://raw.githubusercontent.com/frictionlessdata/ckanext-validation/master/requirements.txt
@@ -432,7 +432,7 @@ For convenience the CKAN_SITE_URL parameter should be set in the .env file. For 
 
 ## 12. Changing the base image
 
-The base image used in the CKAN Dockerfile and Dockerfile.dev can be changed so a different DockerHub image is used eg: ckan/ckan-base:2.10.5 can be used instead of ckan/ckan-base:2.11.0
+The base image used in the CKAN Dockerfile and Dockerfile.dev can be changed so a different DockerHub image is used. This stack pins `ckan/ckan-base:2.12` (production) and `ckan/ckan-dev:2.12` (development), and a bump has to move all of them together — the four Dockerfiles plus `.github/workflows/checks.yml`. `ckan-docker/ckan/tests/test-ckan-image-tag.sh` fails when they disagree, so a half-finished bump is loud instead of silent.
 
 ## 13. Replacing DataPusher with XLoader
 

@@ -20,6 +20,13 @@ Compatibility with core CKAN versions:
 | 2.7             | not tested    |
 | 2.8             | not tested    |
 | 2.9             | not tested    |
+| 2.10            | not tested    |
+| 2.11            | not tested    |
+| 2.12            | yes           |
+
+*(2.12 is the version this extension is developed and exercised against: the
+suite runs on `ckan/ckan-dev:2.12` — see `ckan-docker/bin/test-umss` — and the
+rows above it are untested rather than claimed.)*
 
 Suggested values:
 
