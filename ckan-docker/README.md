@@ -293,6 +293,37 @@ COPY docker-entrypoint.d/* /docker-entrypoint.d/
 
 NB: There are a number of extension examples commented out in the Dockerfile.dev file
 
+#### This repository's extension migration
+
+`ckanext-umss` owns one table and has its own migration for it
+(`src/ckanext-umss/ckanext/umss/migration/umss/`, with an `umss_alembic_version` table of its own so it never
+touches core's). That migration is registered on startup by
+`ckan/docker-entrypoint.d/03_upgrade_umss_schema.sh`, which is the same mechanism as the example above — the
+four Dockerfiles `COPY` the whole `docker-entrypoint.d/` directory — plus two things this repository learned
+the hard way:
+
+1. **It does not pass `--skip-core`.** Measured on the running stack: with `-p <plugin>`, that flag turns
+   `ckan db upgrade` into a **silent no-op that still prints `SUCCESS`**, so anything trusting the exit status
+   would call an un-migrated database healthy.
+2. **It verifies the table, not the exit status.** After the upgrade it runs
+   `select to_regclass('public.publication_requests')` against `CKAN_SQLALCHEMY_URL` and fails loudly if the
+   table is not there. The name is **plural**, and that is load-bearing: an earlier claim that "the dev
+   database has no store table" came from looking up the singular.
+
+The script `return`s instead of `exit`ing, because the entrypoint **sources** `/docker-entrypoint.d/*`: an
+`exit` there would kill PID 1. A failed migration therefore leaves a loud trail and the container keeps
+running with `publication_request_list` answering `500` — visible, not a crash loop.
+
+In development mode the compose file mounts this script explicitly (like `02_disable_debug_toolbar.sh`), so it
+applies without rebuilding the image. To check it by hand:
+
+```sh
+bin/shell -c '. /docker-entrypoint.d/03_upgrade_umss_schema.sh'
+```
+
+Its host test — `ckan-docker/ckan/tests/test-upgrade-umss-schema.sh` — runs without Docker in milliseconds and
+is picked up by the `shell-tests` CI job through the `ckan-docker/*/tests/*.sh` glob.
+
 ### Applying patches
 
 When building your project specific CKAN images (the ones defined in the `ckan/` folder), you can apply patches
