@@ -1,5 +1,5 @@
 """
-Authorization for the five publication actions: `design.md` D4.
+Authorization for the four publication actions: `design.md` D4.
 
 Every predicate here is the **stock** CKAN capacity, reused: the extension
 defines no permission of its own. `has_user_permission_for_group_or_org`
@@ -30,18 +30,15 @@ __all__ = [
     "publication_request_create",
     "publication_request_cancel",
     "publication_request_decide",
-    "publication_publish",
     "publication_request_list",
     "REQUEST_DENIED_MSG",
     "CANCEL_DENIED_MSG",
     "DECIDE_DENIED_MSG",
     "DECIDE_FOUR_EYES_MSG",
     "DECIDE_REQUESTER_CAPACITY_MSG",
-    "PUBLISH_DENIED_MSG",
     "FOUR_EYES_LABEL",
     "REQUESTER_CAPACITY_LABEL",
     "NOT_AN_APPROVER_LABEL",
-    "NOT_A_SYSADMIN_LABEL",
     "ALREADY_PUBLIC_LABEL",
     "CANNOT_REQUEST_LABEL",
     "CANNOT_CANCEL_LABEL",
@@ -59,7 +56,6 @@ ADMIN_PERMISSION = "admin"
 FOUR_EYES_LABEL = "Four eyes"
 REQUESTER_CAPACITY_LABEL = "Requester capacity"
 NOT_AN_APPROVER_LABEL = "Not an approver"
-NOT_A_SYSADMIN_LABEL = "Not a sysadmin"
 ALREADY_PUBLIC_LABEL = "Already public"
 CANNOT_REQUEST_LABEL = "Cannot request"
 CANNOT_CANCEL_LABEL = "Cannot cancel"
@@ -84,10 +80,6 @@ DECIDE_REQUESTER_CAPACITY_MSG = "%s: %s" % (
     REQUESTER_CAPACITY_LABEL,
     "the requester can no longer update this dataset, so the request cannot "
     "be decided",
-)
-PUBLISH_DENIED_MSG = "%s: %s" % (
-    NOT_A_SYSADMIN_LABEL,
-    "only a sysadmin may publish a dataset directly",
 )
 ALREADY_PUBLIC_MSG = "%s: %s" % (
     ALREADY_PUBLIC_LABEL,
@@ -127,10 +119,9 @@ def _requester_holds_capacity(row):
 
     Fails closed: a requester whose id has **no user row at all** — `model.User.get`,
     which does not filter on `state`, so a soft-deleted user still resolves — and a
-    dataset with no resolvable owner both answer `False`. The escape hatch when the
-    requester is gone or degraded is the sysadmin's `publication_publish`, which
-    annuls the pending row and publishes in the same act — never an open
-    decision.
+    dataset with no resolvable owner both answer `False`. There is no escape
+    hatch: no caller, the sysadmin included, publishes directly any more, so a
+    degraded requester leaves the request undecidable — it stays `pending`.
     """
     if not row.requested_by:
         return False
@@ -174,8 +165,7 @@ def publication_request_decide(context, data_dict):
     """D4, plus the governance amendment's four eyes and state re-check.
 
     An org `admin` decides for someone else. Four eyes: the requester cannot
-    decide their own request, and sysadmins have no exception — the sanctioned
-    path for a sysadmin who requested is `publication_publish`.
+    decide their own request, and sysadmins have no exception either.
 
     A2.6 also re-checks the requester's **current** capacity against the
     dataset's **current** owning organization, mirrored from
@@ -185,7 +175,7 @@ def publication_request_decide(context, data_dict):
     the decision (a soft-deleted user still resolves: `model.User.get` does not
     filter on `state`). The refusal is an authorization failure, so the action
     never runs and the row stays `pending` — it is **not** annulled: the two
-    annulment triggers are the deleted dataset and the other publish path.
+    annulment triggers are historical now that direct publish is retired.
 
     `auth_sysadmins_check` is load-bearing, not decoration. Without it CKAN
     short-circuits every sysadmin to success *before* this function runs
@@ -202,8 +192,7 @@ def publication_request_decide(context, data_dict):
 
     # A2.6, requester half: the decision re-checks the requester's **current**
     # capacity, and it has no sysadmin exception — it is placed before the
-    # sysadmin branch below so a sysadmin approver is subject to it too. The
-    # escape hatch for a degraded requester is `publication_publish`.
+    # sysadmin branch below so a sysadmin approver is subject to it too.
     if not _requester_holds_capacity(row):
         return {"success": False, "msg": DECIDE_REQUESTER_CAPACITY_MSG}
 
@@ -216,52 +205,6 @@ def publication_request_decide(context, data_dict):
         return {"success": False, "msg": DECIDE_DENIED_MSG}
     if is_requester:
         return {"success": False, "msg": DECIDE_FOUR_EYES_MSG}
-    return {"success": True}
-
-
-@toolkit.auth_sysadmins_check
-def publication_publish(context, data_dict):
-    """The governance amendment: a sysadmin publishing on their own authority.
-
-    The organization-admin direct path through this action is closed, and the
-    stock `package_patch {private: false}` route is closed too: the wall in
-    `ckanext.umss.auth` refuses it for the org admin (and for every other
-    caller below a sysadmin) with `PUBLISH_VIA_FLOW_MSG`. This action is a
-    sysadmin's.
-
-    The dataset is resolved first, because contract rule 7 requires an
-    unresolvable `dataset_id` to answer `NotFound`, not `403`: the auth answers
-    `success` for an unknown id and the action raises `NotFound`
-    (R1-ORPHAN-ROW). Only the capacity predicate below narrows the caller to a
-    sysadmin.
-
-    An already public dataset is refused here, the way
-    `publication_request_create` refuses one: the flip would be a no-op and the
-    caller would only be piling up identical `approved` rows (A2's review,
-    R3-003).
-
-    The **capacity** predicate runs before the **state** predicate, so a
-    non-sysadmin is denied as a non-sysadmin whatever the dataset's visibility.
-    That preserves master's answer for every non-sysadmin exactly — the same
-    caller, the same `PUBLISH_DENIED_MSG` — and lets the state guard narrow only
-    the sysadmin, the one caller the amendment lets through.
-
-    `auth_sysadmins_check` is load-bearing for that state guard, exactly as it
-    is for `publication_request_decide`. Without it CKAN short-circuits every
-    sysadmin to success *before* this function runs (`ckan/authz.py:224-228`);
-    since the amendment makes this action sysadmin-only, the already-public
-    refusal would then be unreachable for every caller who can reach the action
-    at all. With it, the function runs for a sysadmin too and must answer for
-    that caller explicitly — which it does by returning `success` once the
-    dataset is private.
-    """
-    dataset = model.Package.get(data_dict.get("dataset_id") or "")
-    if dataset is None:
-        return {"success": True}
-    if not ckan_authz.is_sysadmin(context.get("user")):
-        return {"success": False, "msg": PUBLISH_DENIED_MSG}
-    if not dataset.private:
-        return {"success": False, "msg": ALREADY_PUBLIC_MSG}
     return {"success": True}
 
 

@@ -1,33 +1,36 @@
 """Publication-lifecycle authorization guard.
 
 A dataset becomes public when its stored ``private`` value flips to ``False``,
-and only an organization ``admin`` (or a ``sysadmin``) may flip it. This module
-enforces that inside CKAN's authorization layer, so the refusal happens before
-validation and before persistence, and it applies to the API, CKAN's own web UI
-and the portal alike.
+and **no caller** may flip it here: the publication flow is the only route, and
+its own flip writes with ``ignore_auth``. This module enforces that inside
+CKAN's authorization layer, so the refusal happens before validation and before
+persistence, and it applies to the API, CKAN's own web UI and the portal alike.
 
-What this wall does **not** leave open: for every caller core admits, it refuses
-the transition — including the organization ``admin``. On the ``package_update``
-and ``package_create`` chains, core itself refuses ``member``,
+What this wall does **not** leave open: it refuses the publication transition
+for every caller, the ``sysadmin`` included. On the ``package_update`` and
+``package_create`` chains, core itself refuses ``member``,
 cross-organization ``editor`` and anonymous callers before the chain runs, so
 there the wall is the refuser only for the callers core admits.
 ``bulk_update_public`` is the exception: it does not consult core, so it refuses
-every authenticated non-sysadmin itself. The ``admin`` is the
-approver the publication flow authorizes (``publication_request_decide``), but
-no update path publishes — not even for them — so the refusal carries a
-**second**, distinct message (``PUBLISH_VIA_FLOW_MSG``) that names the flow
-instead of the role the caller already holds. ``package_create`` is private for
-everyone (the omitted key is the same publish attempt as ``false``), and
-``bulk_update_public`` is covered by a chained refusal of its own: measured on
-the running CKAN 2.12.0 it loops ``package_patch`` and therefore **does** reach
-``package_update``, but the chain refuses at the action's own auth, before the
-body runs, with a message of ours.
+every caller itself. The organization ``admin`` is the approver the publication
+flow authorizes (``publication_request_decide``), and a ``sysadmin`` administers
+the instance, but no update path publishes — for either of them — so the refusal
+carries a **second**, distinct message (``PUBLISH_VIA_FLOW_MSG``) when the caller
+is one the flow authorizes (a ``sysadmin`` or an organization ``admin``), and
+``PUBLISH_DENIED_MSG`` otherwise. ``package_create`` is private for everyone (the
+omitted key is the same publish attempt as ``false``), and ``bulk_update_public``
+is covered by a chained refusal of its own: measured on the running CKAN 2.12.0
+it loops ``package_patch`` and therefore **does** reach ``package_update``, but
+the chain refuses at the action's own auth, before the body runs, with a message
+of ours.
 
-The ``sysadmin`` is the one declared exception, and it is not special-cased
-here: none of the functions here carries ``auth_sysadmins_check``, so
-``authz.is_authorized`` returns success for a sysadmin *before* any rule below
-runs — the emergency escape hatch the design keeps, with ``publication_publish``
-as the recorded door.
+The ``sysadmin`` is not an exception to the publication rule. All three functions
+carry ``auth_sysadmins_check``, so ``authz.is_authorized`` calls them for a
+``sysadmin`` instead of short-circuiting to success, and the publication
+transition is refused for them too. The one capability this leaves the sysadmin
+is ``state`` administration, which is not publishing: ``package_update`` refuses
+a ``state`` change only below a sysadmin, so ``bulk_update_delete`` and a
+``package_patch {state: ...}`` remain the sysadmin's.
 
 The functions below are *chained* onto core (`toolkit.chained_auth_function`)
 rather than replacing it. Core's ``package_update`` auth is not trivial — owner-org
@@ -35,7 +38,7 @@ capacity, the unowned-dataset config path, optional collaborator fallback and
 ``_check_group_auth`` — and re-implementing it would mean re-implementing its
 bugs. Chaining runs the core decision first and adds one predicate on top. The
 ``bulk_update_public`` chain is the one exception to that ordering, because no
-caller below a sysadmin may reach that action at all and attributing the
+caller may reach that action at all and attributing the
 refusal to this module is the point.
 
 What that covers. ``package_patch``, ``package_delete`` and ``package_revise``
@@ -71,10 +74,12 @@ Three properties keep this safe rather than clever:
 for every non-sysadmin, so a ``403`` there would deny a request CKAN was never
 going to honour.
 
-Sysadmin access is preserved for free. ``authz.is_authorized`` returns success
-for a sysadmin *before* calling any registered auth function, unless that
-function carries ``auth_sysadmins_check``. None of the functions here sets that
-flag.
+Sysadmin access is deliberately narrowed, not preserved for free:
+``authz.is_authorized`` returns success for a sysadmin *before* calling any
+registered auth function unless that function carries
+``auth_sysadmins_check``, and all three functions here set that flag. So the wall
+runs for a sysadmin and refuses the publication transition; the only sysadmin
+capability it keeps is ``state`` administration.
 
 ``auth_allow_anonymous_access`` is declared for a subtler reason: CKAN builds a
 chained function as ``functools.partial(func, prev_func)`` and copies only
@@ -97,9 +102,8 @@ import ckan.plugins.toolkit as toolkit
 #: The refusal **labels** are the frozen interface a consumer matches on:
 #: every message below reads ``<label>: <sentence>``, the label is the part
 #: that must not change, and the sentence after it is free prose. ``Publish
-#: denied`` belongs to the wall's own ``PUBLISH_DENIED_MSG`` and is deliberately
-#: distinct from the ``publication_publish`` action's ``Not a sysadmin``, so the
-#: two same-named constants in different modules stay separable by label.
+#: denied`` belongs to the wall's own ``PUBLISH_DENIED_MSG``; a caller the
+#: publication flow authorizes reads ``Publication flow`` instead.
 PUBLISH_DENIED_LABEL = "Publish denied"
 PUBLICATION_FLOW_LABEL = "Publication flow"
 
@@ -112,12 +116,12 @@ PUBLICATION_FLOW_LABEL = "Publication flow"
 #: what reaches the translator.
 PUBLISH_DENIED_MSG = "%s: %s" % (
     PUBLISH_DENIED_LABEL,
-    toolkit._("only an organization administrator can publish a dataset"),
+    toolkit._("only an organization administrator can decide a publication request"),
 )
 
-#: The message an *approver* gets from the wall. The caller who holds the
-#: ``admin`` capacity (or cascades to it through a parent organization) is the
-#: one the publication flow authorizes, so the refusal has to name that flow
+#: The message a caller the publication flow authorizes gets from the wall.
+#: That caller is a ``sysadmin`` or the one who holds the ``admin`` capacity (or
+#: cascades to it through a parent organization), so the refusal names the flow
 #: rather than the role the caller already holds. It is deliberately a second
 #: constant: the spec's `Distinguishable Authorization Errors` requires the two
 #: messages to be distinguishable, and a consumer that reads only one of them
@@ -150,6 +154,27 @@ def _is_approver(context, owner_org) -> bool:
     return authz.has_user_permission_for_group_or_org(
         owner_org, context.get("user"), "admin"
     )
+
+
+def _is_flow_caller(context, owner_org) -> bool:
+    """True when the caller is one the publication flow authorizes.
+
+    That is a ``sysadmin`` (the instance's administrator) or an org ``admin``
+    for ``owner_org`` (`_is_approver`). The refusal message is chosen by this
+    fact, not by role: ``PUBLISH_VIA_FLOW_MSG`` tells a caller the flow
+    authorizes that the flow is the door, and ``PUBLISH_DENIED_MSG`` tells
+    everyone else they are not one.
+    """
+    if authz.is_sysadmin(context.get("user")):
+        return True
+    return _is_approver(context, owner_org)
+
+
+def _refusal(context, owner_org):
+    """The refusal dict for ``context``, with its message chosen by fact."""
+    if _is_flow_caller(context, owner_org):
+        return {"success": False, "msg": PUBLISH_VIA_FLOW_MSG}
+    return {"success": False, "msg": PUBLISH_DENIED_MSG}
 
 
 def _as_bool(value: Any) -> bool:
@@ -185,9 +210,19 @@ def _load_or_defer(context, data_dict):
 
 
 @toolkit.chained_auth_function
+@toolkit.auth_sysadmins_check
 @toolkit.auth_allow_anonymous_access
 def package_update(next_auth, context, data_dict):
-    """Refuse a visibility or state transition requested by any caller."""
+    """Refuse a publication transition for every caller; refuse a state
+    transition only below a sysadmin.
+
+    The two are separated on purpose. A publication is a ``private`` flip to
+    ``False``, and no caller — the sysadmin included — may make it here: the
+    flow is the only route, so the wall runs for the sysadmin too. A ``state``
+    change is not a publication, so it stays the sysadmin's exactly as it was:
+    administering ``state`` (``bulk_update_delete``, for instance) must not be
+    closed by accident.
+    """
     result = next_auth(context, data_dict)
     if not result.get("success"):
         return result
@@ -210,16 +245,18 @@ def package_update(next_auth, context, data_dict):
     wanted_state = data_dict.get("state", pkg.state)
     wants_state_change = wanted_state is not None and wanted_state != pkg.state
 
-    if not (wants_private_public or wants_state_change):
-        return result
-    if _is_approver(context, pkg.owner_org):
-        # The approver is refused too; the message names the door so the two
-        # callers are not conflated.
-        return {"success": False, "msg": PUBLISH_VIA_FLOW_MSG}
-    return {"success": False, "msg": PUBLISH_DENIED_MSG}
+    if wants_private_public:
+        # Publication: refused for every caller, the sysadmin included.
+        return _refusal(context, pkg.owner_org)
+    if wants_state_change and not authz.is_sysadmin(context.get("user")):
+        # `state` administration is not publishing: refused below a sysadmin,
+        # preserved for the sysadmin.
+        return _refusal(context, pkg.owner_org)
+    return result
 
 
 @toolkit.chained_auth_function
+@toolkit.auth_sysadmins_check
 @toolkit.auth_allow_anonymous_access
 def package_create(next_auth, context, data_dict):
     """Refuse a dataset that would be stored public.
@@ -254,16 +291,14 @@ def package_create(next_auth, context, data_dict):
     if "private" in data_dict and _as_bool(data_dict["private"]) is True:
         return result
     # An absent key, or any value core reads as public, is a publication attempt.
-    # Creation is private for everyone, the approver included: the administrator
-    # publishes afterwards through the action, so the message names the flow.
-    if _is_approver(context, owner_org):
-        return {"success": False, "msg": PUBLISH_VIA_FLOW_MSG}
-    return {"success": False, "msg": PUBLISH_DENIED_MSG}
+    # Creation is private for everyone, the sysadmin included.
+    return _refusal(context, owner_org)
 
 
 @toolkit.chained_auth_function
+@toolkit.auth_sysadmins_check
 def bulk_update_public(next_auth, context, data_dict):
-    """Refuse the bulk publication door for every caller below a sysadmin.
+    """Refuse the bulk publication door for every caller.
 
     Measured on the running CKAN 2.12.0 (``/srv/app/src/ckan``, commit
     ``0058b2eb``), ``_bulk_update_dataset`` loops ``_get_action('package_patch')``
@@ -282,11 +317,14 @@ def bulk_update_public(next_auth, context, data_dict):
     ``has_user_permission_for_group_or_org(org_id, user, 'update')`` — a
     permission the ``editor`` role does not carry but the ``admin`` role does.
 
-    No caller below a sysadmin may use this action: it is a publication path
+    No caller may use this action: it is a publication path
     with no record and no diff to inspect, so the refusal does not depend on
     core's answer. ``next_auth`` is therefore deliberately not called — core
     refuses an ``editor`` with an empty message, and the plugin's own message is
-    what makes the refusal distinguishable and attributable to this rule.
+    what makes the refusal distinguishable and attributable to this rule. The
+    message is chosen by fact, and on this route the fact is the payload's
+    ``org_id``: an org ``admin`` of that organization and a ``sysadmin`` get
+    ``PUBLISH_VIA_FLOW_MSG``; everyone else gets ``PUBLISH_DENIED_MSG``.
 
     There is no ``auth_allow_anonymous_access`` here on purpose: core's own
     ``bulk_update_public`` does not carry the flag either (unlike
@@ -294,6 +332,4 @@ def bulk_update_public(next_auth, context, data_dict):
     drop), so re-declaring it would *change* core's anonymous behaviour instead
     of preserving it.
     """
-    if _is_approver(context, data_dict.get("org_id")):
-        return {"success": False, "msg": PUBLISH_VIA_FLOW_MSG}
-    return {"success": False, "msg": PUBLISH_DENIED_MSG}
+    return _refusal(context, data_dict.get("org_id"))
