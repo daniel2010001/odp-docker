@@ -103,11 +103,16 @@ import ckan.plugins.toolkit as toolkit
 PUBLISH_DENIED_LABEL = "Publish denied"
 PUBLICATION_FLOW_LABEL = "Publication flow"
 
-PUBLISH_DENIED_MSG = toolkit._(
-    "%s: %s" % (
-        PUBLISH_DENIED_LABEL,
-        "only an organization administrator can publish a dataset",
-    )
+#: The label stays **outside** the translatable unit: what a consumer matches
+#: must not move with the language, while the sentence after it is what a human
+#: reads and is the part `toolkit._` is applied to. Composing the two outside the
+#: call also keeps the translator's message the sentence itself: with `_` as an
+#: extraction keyword, `_("%s: %s" % (label, sentence))` extracts the template
+#: `"%s: %s"`, which the runtime lookup can never match — the *composed* string is
+#: what reaches the translator.
+PUBLISH_DENIED_MSG = "%s: %s" % (
+    PUBLISH_DENIED_LABEL,
+    toolkit._("only an organization administrator can publish a dataset"),
 )
 
 #: The message an *approver* gets from the wall. The caller who holds the
@@ -117,11 +122,9 @@ PUBLISH_DENIED_MSG = toolkit._(
 #: constant: the spec's `Distinguishable Authorization Errors` requires the two
 #: messages to be distinguishable, and a consumer that reads only one of them
 #: must not conflate the two callers.
-PUBLISH_VIA_FLOW_MSG = toolkit._(
-    "%s: %s" % (
-        PUBLICATION_FLOW_LABEL,
-        "publication goes through the publication flow, not package_patch",
-    )
+PUBLISH_VIA_FLOW_MSG = "%s: %s" % (
+    PUBLICATION_FLOW_LABEL,
+    toolkit._("publication goes through the publication flow, not package_patch"),
 )
 
 #: Exactly the strings `ckan.logic.validators.boolean_validator` reads as `True`.

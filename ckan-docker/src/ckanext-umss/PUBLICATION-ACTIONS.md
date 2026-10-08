@@ -13,7 +13,8 @@ once so both sides read it from the same place.
 | The five actions **as delivered** (`unit/a2-governance`, range `63ec806..HEAD`) | implement the governance amendment: `publication_publish` is `sysadmin`-only, `publication_decide` carries the four-eyes and current-capacity re-checks, a lost object is `annulled`, and the returned rows carry `requested_by_name` / `approved_by_name` |
 | The advisory corrections carried on top (`unit/a2-advisories-v2`) | the branch carries the **eight** advisory findings of A2's first review; **two of them are contract-visible** and are the ones reflected below, both **measured** by the suite: `publication_request_list` resolves every dataset's owner org in **one** query and evaluates the capacity **once per organisation** (behaviour unchanged — it narrows to the same rows — only the helper changed, and the old `_may_see` is gone); and `publication_publish` refuses an **already public** dataset |
 | **This file describes** | the contract of `unit/a2-governance`, which is **delivered and natively reviewed**, plus the two contract-visible advisory corrections of `unit/a2-advisories-v2`, plus the `A3` wall (`unit/a3-wall`), **merged to `master`**: its refusal of the stock `package_patch {private: false}` route, any `state` change, a public `package_create`, and `bulk_update_public` |
-| **On `unit/titles-and-labels`** | two consumer-facing additions, **not yet reviewed or delivered**: the returned rows also carry `dataset_title` / `organization_title` (resolved in the same single query as the owner organisation, with the names' `None` / `"unknown"` fallbacks), and every refusal below reads `<frozen label>: <free prose>` with the labels declared as constants and pinned by test |
+| **`unit/titles-and-labels`** | **delivered and merged** to `master` in the PR #4 (`02893f7`), natively reviewed (`review-6a40aaa7e5a3b385`, tier high, 4/4 lenses, approved and acknowledged, authority burned; 3 informational findings) and CI green (run `37705879038`): the returned rows also carry `dataset_title` / `organization_title` (resolved in the same single query as the owner organisation, with the names' `None` / `"unknown"` fallbacks), and every refusal below reads `<frozen label>: <free prose>` with the labels declared as constants and pinned by test |
+| **`unit/labels-outside-translation`** | the label of every refusal is now composed **outside** `toolkit._(...)`, so the part a consumer matches no longer sits inside a translatable unit; the wall's two sentences stay translated. The nine label **values** are unchanged. Guarded by a **structural** test, because the defect is invisible to behaviour — see *What is translated, and what is matched* below |
 | The review of record (**relayed**) | lineage `review-4b6ecc112fa966fa`, tier **high**, **4/4 lenses**, **approved and acknowledged**; the review authority is burned; the **9 findings are informational**, none blocking, none reopening the lineage, and they are declared as later work at the end of this file. This metadata is **relayed** from the provider's review envelope and from the state file read before acknowledgement — it is **not reproducible from the repository now** |
 | The governance amendment | `odp` commit `41de6c2`, `design.md:194,207` and `spec.md:284,586` |
 | The unit's state and what it must carry | `HANDOFF-2026-10-07.md` (tracked, repository root) |
@@ -230,6 +231,55 @@ anonymous caller are refused by core before the chain runs, so they keep core's 
 and answers every authenticated non-sysadmin that reaches it, core-admitted or not. Every other
 `403` refusal the two modules **declare as a module-level message constant** is a row above; the
 invariant test keeps that true for that surface, and the `409` refusals are the separate class below.
+
+### What is translated, and what is matched
+
+**The property: what a human reads is translated; what a consumer matches is not.** In the wall the
+label is composed **outside** `toolkit._(...)` and the sentence inside it; the seven messages of
+`logic/auth/publication.py` compose both outside any translator. The nine label **values** are identical
+before and after — what this unit moved is the boundary of the translatable unit.
+
+Three facts, measured on the running stack (`babel 2.18.0`, CKAN 2.12.0) while this unit was written, are
+what make that boundary the whole point:
+
+1. **`toolkit._` is `ckan.common.ugettext` → `flask_babel.gettext`, and it is eager.** It returns a `str`
+   at the moment it is called. In a module-level constant that call happens **once, at import**, under the
+   locale in force then — not per request.
+2. **This extension ships no message catalogue.** `ckanext/umss/i18n/` holds an empty `.gitignore` and
+   nothing else: no `.pot`, no `.po`, no `.mo`, although `setup.cfg` carries the template's
+   `[extract_messages]` / `[compile_catalog]` sections pointing at `ckanext/umss/i18n/ckanext-umss.pot`.
+3. **This project's extraction does not reach these strings at all.** `setup.cfg` declares
+   `keywords = translate isPlural` and `babel.extractors = ckan = ckan.lib.extract:extract_ckan`, and that
+   extractor (`ckan/lib/extract.py`) is the **Jinja** one, for templates; for Python the keyword is
+   `translate`, not `_`. Under a `_` keyword — which this project does **not** use — babel's extractor
+   takes `_("%s: %s" % (LABEL, "…"))` and extracts the template `"%s: %s"` as a message: one that can
+   never match at runtime, where the **composed** string is what reaches the translator, and that leaves
+   the sentence itself unreachable. Measured, not reasoned.
+
+So the defect this unit closes is **latent and unprovable by behaviour**: the label sat inside the
+translator's argument while nothing translates it. It was invisible by inspection — no caller sees a
+different string, in any language, today. What it was: one catalogue entry, or one added `_` extraction
+keyword, away from silently changing an interface a consumer matches. A guard that asserted the
+observable behaviour would have been green with the hole open, which is the same failure shape as the
+`_as_bool` mirror that was faithful to a CKAN version that no longer runs.
+
+**The guard is therefore structural and lives where the constants live**
+(`test_the_refusal_labels_are_not_translated`): each refusal module is loaded a **second time**, in a
+namespace of its own, with `toolkit._` replaced by a translator that marks every string it is handed
+(`lambda s: "[t]" + s`), and the invariant the ordinary row checks — *every refusal opens with a declared
+label* — is re-run in that marked world. If a label moves back inside `toolkit._(...)`, the mark lands
+**in front of** it and the invariant falls. Two companions keep the guard honest: it asserts the mark
+**still appears** in the wall's two messages (so a probe whose patch never took effect cannot pass
+vacuously, and so the fix is pinned as *label out, sentence stays*), and
+`test_the_translation_guardian_can_fail` builds both shapes and shows the guard separates them.
+
+**Deliberately not adopted.** Wrapping the seven action sentences in `toolkit._` as well was considered
+and rejected: the portal renders **its own** sentence from the label (this file says so above), so that
+prose is support copy rather than user copy, and the asymmetry is now **declared** instead of accidental.
+Dropping `_()` from the wall entirely was also rejected: it would remove a declared intent for no gain
+today, and that is the author's call, not ours. If a translation is ever wanted for the action sentences,
+the change is `_()` **around the sentence only** — the guard above already accepts that shape and rejects
+the other one.
 
 ### Two classes of refusal: `403` carries a label, `409` carries a key
 

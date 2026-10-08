@@ -26,6 +26,9 @@ The contract these tests pin, for the portal that consumes it:
 `requested_by` and `approved_by` carry **user ids**, which is the convention the
 rest of CKAN follows (`package_show` answers `creator_user_id`, not a name).
 """
+import importlib.util
+from unittest import mock
+
 import pytest
 import sqlalchemy as sa
 
@@ -954,6 +957,60 @@ def test_the_nine_refusal_labels_are_the_interface_values():
         assert message.startswith(label + ": "), (label, message)
 
 
+#: The two modules that declare refusals to a consumer.
+REFUSAL_MODULES = (auth_publication, umss_auth)
+
+#: What stands in for the translator in the structural guardian below: a
+#: translator that leaves a visible mark on every string it is handed. A label
+#: that is *inside* a translatable unit arrives with the mark **in front of it**.
+TRANSLATION_SENTINEL = "[t]"
+
+
+def _declared_labels(module):
+    """Every `<name>_LABEL` string the module declares."""
+    return {
+        value
+        for name, value in vars(module).items()
+        if name.endswith("_LABEL") and isinstance(value, str)
+    }
+
+
+def _declared_messages(module):
+    """Every `<name>_MSG` string the module declares, as `{name: value}`."""
+    return {
+        name: value
+        for name, value in vars(module).items()
+        if name.endswith("_MSG") and isinstance(value, str)
+    }
+
+
+def _module_under_a_marking_translator(module):
+    """Load `module` a second time, in a namespace of its own, with `toolkit._`
+    replaced by the marking translator.
+
+    The live module is not touched: the probe is a **separate module object**, so
+    the mark cannot leak into another test, and `importlib.reload` is avoided
+    precisely because it would mutate the module every other test in the process
+    holds. Both modules are pure (a docstring, imports, assignments and
+    functions, measured with `ast`), so re-executing one has no side effect to
+    undo.
+
+    It is a **probe, not a simulation**: the real source runs, so what it
+    measures is where the label sits relative to the translator's argument — the
+    property no behaviour can show, since there is no catalog whose absence or
+    presence would change what a caller sees.
+    """
+    spec = importlib.util.spec_from_file_location(
+        module.__name__ + "__under_translation", module.__file__
+    )
+    probe = importlib.util.module_from_spec(spec)
+    with mock.patch.object(
+        toolkit, "_", lambda message: TRANSLATION_SENTINEL + message
+    ):
+        spec.loader.exec_module(probe)
+    return probe
+
+
 def test_every_refusal_message_begins_with_a_declared_label():
     """The invariant the labels exist for: **no consumer ever has to match a
     sentence** — for every refusal the modules declare as a message constant.
@@ -969,23 +1026,81 @@ def test_every_refusal_message_begins_with_a_declared_label():
     is picked up automatically from the module.
     """
     labels = set()
-    for module in (auth_publication, umss_auth):
-        labels |= {
-            value
-            for name, value in vars(module).items()
-            if name.endswith("_LABEL") and isinstance(value, str)
-        }
+    for module in REFUSAL_MODULES:
+        labels |= _declared_labels(module)
     assert labels
 
     prefixes = tuple(label + ": " for label in labels)
     seen = 0
-    for module in (auth_publication, umss_auth):
-        for name, value in vars(module).items():
-            if not (name.endswith("_MSG") and isinstance(value, str)):
-                continue
+    for module in REFUSAL_MODULES:
+        for name, value in _declared_messages(module).items():
             seen += 1
             assert value.startswith(prefixes), (module.__name__, name, value)
     assert seen >= 9, seen
+
+
+def test_the_refusal_labels_are_not_translated():
+    """The same invariant, re-checked in a translated world — the property the
+    labels exist for, and the one no behaviour can show.
+
+    A label is the interface a consumer matches and the sentence after it is
+    free prose, so the label must stay **outside** the translatable unit: what is
+    translated is what a human reads, never what is matched. Nothing translates
+    these messages today — the extension ships no catalog (`ckanext/umss/i18n/`
+    holds an empty `.gitignore` and nothing else) and this project extracts only
+    the `translate` / `isPlural` keywords, not `_` — so the defect is **invisible
+    by inspection**: the day the composed string gains a translation, the prefix
+    stops matching and no other row in this suite would notice. That is why the
+    guard is structural: each refusal module is loaded a second time under a
+    **marking** translator, and the invariant above runs again. If a label moves
+    back inside `toolkit._(...)`, the mark lands in front of it and the invariant
+    falls.
+
+    A **RED until the wall's `_()` stops containing its label**, and a pin on the
+    rest: the probe asserts the mark *still* appears in the wall's two messages,
+    because the fix pulls the label out of the translator and not the prose. That
+    assertion is also what keeps this row from being vacuous — a probe where
+    `toolkit._` was never replaced would satisfy the invariant and prove nothing.
+    """
+    probes = {
+        module.__name__: _module_under_a_marking_translator(module)
+        for module in REFUSAL_MODULES
+    }
+
+    wall = probes[umss_auth.__name__]
+    marked = [
+        name
+        for name, value in _declared_messages(wall).items()
+        if TRANSLATION_SENTINEL in value
+    ]
+    assert marked, "the marking translator never reached a message: it proves nothing"
+
+    for probe in probes.values():
+        labels = _declared_labels(probe)
+        assert labels
+        prefixes = tuple(label + ": " for label in labels)
+        for name, value in _declared_messages(probe).items():
+            assert value.startswith(prefixes), (probe.__name__, name, value)
+
+
+def test_the_translation_guardian_can_fail():
+    """The witness that the guardian above is worth its green: the shape it has
+    to reject, next to the shape it has to accept.
+
+    A row that promises a property it cannot observe is worse than no row, so the
+    discriminating power is itself pinned: with the label inside the translated
+    unit the mark precedes the label and the invariant fails; with the label
+    outside it, the same message opens with the label and passes. Both strings
+    are built here rather than imported from the modules, so this test states the
+    rule and not the current state of the code.
+    """
+    label = umss_auth.PUBLISH_DENIED_LABEL
+
+    label_inside = TRANSLATION_SENTINEL + "%s: %s" % (label, "any sentence")
+    label_outside = "%s: %s" % (label, TRANSLATION_SENTINEL + "any sentence")
+
+    assert not label_inside.startswith(label + ": ")
+    assert label_outside.startswith(label + ": ")
 
 
 def test_the_action_denial_has_its_own_label():
