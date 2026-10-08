@@ -162,7 +162,7 @@ The bypasses that remain are named individually under *Named bypasses* below.
    caller may see: the stock `update_dataset` capacity on the dataset's org (which cascades down the
    organization hierarchy), plus the caller's own requests.
 
-### Three publish-denial messages, three rules
+### Two publish-denial messages, two rules
 
 Publication is refused with one of **three** texts, two of them in the wall:
 
@@ -183,7 +183,7 @@ Publication is refused with one of **three** texts, two of them in the wall:
 
 The claim this section used to carry — that an organization `admin` may still use the stock
 `package_patch {private: false}` route (the wall's door) — is **false as of `A3`**: that route is
-refused, with the flow message above. A consumer that reads only one of the three, or assumes they
+refused, with the flow message above. A consumer that reads only one of the two, or assumes they
 encode the same rule, will be wrong.
 
 ### The refusal labels are interface

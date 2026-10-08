@@ -44,8 +44,31 @@ jobs:
       # service ships the CKAN configset but only precreates the `ckan` core, so
       # create the test one. An absolute configSet path is required: a bare name
       # is resolved against `<solr.home>/configsets`, which has no CKAN schema.
+      #
+      # Idempotent on purpose, and with timeouts: an unconditional CREATE that
+      # assumes a virgin Solr either fails on a rerun or, worse, hangs the job on a
+      # Solr that accepts the connection and never answers.
       run: |
-        python -c "import urllib.request; print(urllib.request.urlopen('http://solr:8983/solr/admin/cores?action=CREATE&name=ckan_test&configSet=/opt/solr/server/solr/configsets/ckan').read().decode())"
+        python - <<'PY'
+        import json, urllib.request, urllib.error
+
+        base = "http://solr:8983"
+        with urllib.request.urlopen(base + "/solr/admin/cores?action=STATUS", timeout=30) as r:
+            if "ckan_test" in json.load(r).get("status", {}):
+                print("ckan_test already exists: nothing to create")
+                raise SystemExit(0)
+        url = (base + "/solr/admin/cores?action=CREATE&name=ckan_test"
+               "&configSet=/opt/solr/server/solr/configsets/ckan")
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                print(r.read().decode())
+        except urllib.error.HTTPError as e:
+            # A create that raced another create is fine; anything else is not.
+            body = e.read().decode()
+            if "already exists" not in body:
+                raise SystemExit("could not create ckan_test: %s" % body)
+            print("ckan_test already exists (create raced): nothing to do")
+        PY
 
     - name: Setup extension
       # Extra initialization steps
