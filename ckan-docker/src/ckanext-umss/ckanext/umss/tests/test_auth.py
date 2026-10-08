@@ -146,13 +146,15 @@ def test_the_guard_is_registered_for_every_guarded_action_name():
         assert getattr(registered, "chained_auth_function", False) is True, action
 
 
-def test_the_guard_does_not_set_auth_sysadmins_check():
-    """The declared sysadmin bypass is load-bearing: without the flag,
-    `is_authorized` answers success for a sysadmin *before* any chained rule
-    runs, so the guard must not set it (`ckan/authz.py:224-228`)."""
+def test_the_guard_sets_auth_sysadmins_check():
+    """The closure is load-bearing: with `auth_sysadmins_check`, `is_authorized`
+    calls the chained rule for a sysadmin instead of short-circuiting to success
+    (`ckan/authz.py:224-228`), which is what lets the wall refuse the publication
+    transition to every caller. Without the flag the sysadmin would still
+    publish through the stock route."""
     for action in ("package_update", "package_create", "bulk_update_public"):
         registered = ckan.authz._AuthFunctions.get(action)
-        assert getattr(registered, "auth_sysadmins_check", False) is False, action
+        assert getattr(registered, "auth_sysadmins_check", False) is True, action
 
 
 def test_editor_package_patch_private_false_is_refused(scene):
@@ -181,27 +183,108 @@ def test_editor_full_package_update_flipping_private_is_refused(scene):
     assert stored(scene["dataset"]["id"])["private"] is True
 
 
-def test_sysadmin_stock_package_patch_still_publishes_without_a_row(scene, store):
-    """A3.3: the declared bypass survives. CKAN short-circuits sysadmins before
-    any auth function, and the stock `package_patch` route stays open to them as
-    the emergency escape hatch — unrecorded, by design."""
-    call_as(factories.Sysadmin(), "package_patch",
-            id=scene["dataset"]["id"], private=False)
-    assert stored(scene["dataset"]["id"])["private"] is False
+def test_sysadmin_stock_package_patch_is_refused_and_writes_nothing(scene, store):
+    """The closed route, not the old bypass. This test used to pin the
+    sysadmin's unrecorded stock escape: CKAN short-circuits a sysadmin before any
+    auth function unless the function carries `auth_sysadmins_check`, and the wall
+    did not. The author's decision closes that route — no caller publishes
+    directly — so the wall now carries the flag and refuses the transition, and
+    the refusal writes no row either."""
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(factories.Sysadmin(), "package_patch",
+                id=scene["dataset"]["id"], private=False)
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
     assert publication_rows(scene["dataset"]["id"]) == []
 
 
-def test_sysadmin_recorded_door_writes_its_row(scene, store):
-    """A3.3: the sysadmin's recorded door, `publication_publish`, publishes and
-    writes the approved row in the same act — the contrast with the unrecorded
-    stock bypass above."""
-    sysadmin = factories.Sysadmin()
-    call_as(sysadmin, "publication_publish", dataset_id=scene["dataset"]["id"])
+def test_sysadmin_publishing_package_update_is_refused(scene, store):
+    """The full update loop, not only `package_patch`: a `package_update` that
+    requests `private=False` is refused for a sysadmin too, and the stored value
+    does not move."""
+    payload = dict(stored(scene["dataset"]["id"]))
+    payload.pop("tracking_summary", None)
+    payload["private"] = False
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(factories.Sysadmin(), "package_update", **payload)
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert publication_rows(scene["dataset"]["id"]) == []
+
+
+@pytest.mark.parametrize("name, payload", [
+    ("sysadmin-create-false", {"private": False}),
+    ("sysadmin-create-omitted", {}),
+])
+def test_sysadmin_public_package_create_is_refused(scene, store, name, payload):
+    """`false` and an omitted key are both publication attempts at create time,
+    and the sysadmin is refused on both: nothing is created."""
+    data = dict(payload, name=name, owner_org=scene["org"]["id"])
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(factories.Sysadmin(), "package_create", **data)
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+    with pytest.raises(logic.NotFound):
+        stored(name)
+
+
+def test_sysadmin_bulk_update_public_is_refused(scene, store):
+    """The bulk door carves out no caller: the sysadmin gets the flow message,
+    like any caller the flow authorizes."""
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(factories.Sysadmin(), "bulk_update_public",
+                org_id=scene["org"]["id"], datasets=[scene["dataset"]["id"]])
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+def test_sysadmin_private_package_create_is_still_allowed(scene):
+    """Creating private is not publishing: the wizard's payload keeps working
+    for a sysadmin."""
+    created = call_as(factories.Sysadmin(), "package_create",
+                      name="sysadmin-private-create",
+                      owner_org=scene["org"]["id"], private=True)
+    assert created["private"] is True
+
+
+def test_sysadmin_metadata_only_patch_is_still_allowed(scene):
+    call_as(factories.Sysadmin(), "package_patch",
+            id=scene["dataset"]["id"], title="sysadmin metadata edit")
+    updated = stored(scene["dataset"]["id"])
+    assert updated["title"] == "sysadmin metadata edit"
+    assert updated["private"] is True
+
+
+def test_sysadmin_state_change_is_still_allowed(scene):
+    """`state` administration is not publishing: the sysadmin keeps it, and the
+    wall refuses it only below a sysadmin."""
+    call_as(factories.Sysadmin(), "package_patch",
+            id=scene["dataset"]["id"], state="draft")
+    assert stored(scene["dataset"]["id"])["state"] == "draft"
+
+
+def test_sysadmin_bulk_update_delete_is_still_allowed(scene):
+    """The preserved capability through the bulk route: `bulk_update_delete`
+    loops `package_patch {state: 'deleted'}`, and the wall lets the sysadmin's
+    `state` change through."""
+    call_as(factories.Sysadmin(), "bulk_update_delete",
+            org_id=scene["org"]["id"], datasets=[scene["dataset"]["id"]])
+    ckan.model.Session.commit()
+    ckan.model.Session.expire_all()
+    deleted = ckan.model.Session.get(ckan.model.Package, scene["dataset"]["id"])
+    assert deleted.state == "deleted"
+
+
+def test_the_sanctioned_flow_still_publishes_with_a_sysadmin_approver(scene, store):
+    """The proof the closed wall did not break the only remaining door: the
+    sysadmin cannot publish directly, but the flow still publishes when the
+    sysadmin approves someone else's request. The approving action writes with
+    `ignore_auth`, so the wall is never consulted for the flip."""
+    created = call_as(scene["editor"], "publication_request_create",
+                      dataset_id=scene["dataset"]["id"])
+    decided = call_as(factories.Sysadmin(), "publication_request_decide",
+                      request_id=created["id"], approve=True)
+    assert decided["status"] == "approved"
     assert stored(scene["dataset"]["id"])["private"] is False
-    rows = publication_rows(scene["dataset"]["id"])
-    assert len(rows) == 1
-    assert rows[0].status == umss_model.APPROVED
-    assert rows[0].approved_by == sysadmin["id"]
 
 
 def test_org_admin_package_patch_private_false_is_refused(scene):
@@ -388,9 +471,9 @@ def test_omitting_private_resolves_to_the_public_column_default(scene):
     The same payload the editor was refused for, sent by a caller who *may*
     publish, stores a public dataset: `private` is absent from the requested
     dict, so `ignore_missing` drops it and the column default
-    (`ckan/model/package.py:75`, `default=False`) applies. After A3 the caller
-    who may publish is a `sysadmin`; the factory below is the sysadmin's own
-    write and is not gated by the wall.
+    (`ckan/model/package.py:75`, `default=False`) applies. No action caller may
+    publish directly any more, so the factory below is a test-only write that
+    is not gated by the wall.
     """
     created = factories.Dataset(owner_org=scene["org"]["id"])
     assert created["private"] is False
@@ -512,6 +595,11 @@ def test_bulk_update_public_is_refused_by_the_chained_rule(scene):
     `admin` passes it. The refusal must therefore be **ours** in both cases —
     the editor's message proves core did not answer it, because core answers
     `{'success': False}` with no message.
+
+    The message is chosen by fact, and on this route the fact is the payload's
+    `org_id`: the `admin` who holds the capacity for that organization is a
+    caller the flow authorizes, so the refusal names the flow — exactly as it
+    did before the sysadmin's own route was closed.
     """
     with pytest.raises(logic.NotAuthorized) as editor_exc:
         call_as(scene["editor"], "bulk_update_public",
@@ -522,6 +610,7 @@ def test_bulk_update_public_is_refused_by_the_chained_rule(scene):
         call_as(scene["admin"], "bulk_update_public",
                 org_id=scene["org"]["id"], datasets=[scene["dataset"]["id"]])
     assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(admin_exc.value)
+    assert umss_auth.PUBLISH_DENIED_MSG not in str(admin_exc.value)
 
     assert stored(scene["dataset"]["id"])["private"] is True
 
@@ -597,10 +686,10 @@ def handed_to_the_rule(monkeypatch):
     dict its own `get` reads; `monkeypatch` puts the original back at teardown,
     and `get` is called first so the cache is built before it is read.
 
-    Only a non-sysadmin caller reaches the chain at all: `is_authorized` answers
-    success for a sysadmin before consulting it, and a context carrying
-    `ignore_auth` returns even earlier — which is why the fixture's own
-    `helpers.call_action` writes never touch this spy.
+    A context carrying `ignore_auth` returns before the chain even for a
+    sysadmin — which is why the fixture's own `helpers.call_action` writes never
+    touch this spy. With `auth_sysadmins_check` on the chain, a plain sysadmin
+    request does reach it.
     """
     original = ckan.authz._AuthFunctions.get("package_update")
     seen = {}

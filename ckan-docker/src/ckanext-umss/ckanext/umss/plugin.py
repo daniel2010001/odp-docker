@@ -27,23 +27,21 @@ class UmssPlugin(plugins.SingletonPlugin):
     # IActions
 
     def get_actions(self):
-        """The queue and the door (D4). `publication_decide {approve: true}` and
-        `publication_publish` are the only **recorded** way a dataset becomes
-        public. The wall in `ckanext.umss.auth` refuses a flip by every caller
-        core admits, the organization admin included: the stock
-        `package_patch {private: false}` route and any `state` change are
-        refused, as is a public `package_create`, and `bulk_update_public` is
-        covered by a chain of its own, which answers every non-sysadmin directly
-        because it does not call `next_auth`. Core itself refuses `member`, a
-        cross-organization `editor` and anonymous callers before the wall runs.
-        So no raw core call is a second, unrecorded door for a caller below a
-        sysadmin; the sysadmin's own stock bypass remains.
+        """The queue and the door (D4). `publication_request_decide
+        {approve: true}` is the only **recorded** way a dataset becomes public;
+        there is no direct publish action. The wall in `ckanext.umss.auth`
+        refuses a flip by every caller, the sysadmin included: the stock
+        `package_patch {private: false}` route is refused, as is a `state`
+        change below a sysadmin, a public `package_create`, and
+        `bulk_update_public` is covered by a chain of its own, which answers
+        every caller directly because it does not call `next_auth`. Core itself
+        refuses `member`, a cross-organization `editor` and anonymous callers
+        before the wall runs. So no raw core call is a second, unrecorded door.
         """
         return {
             "publication_request_create": publication_actions.publication_request_create,
             "publication_request_cancel": publication_actions.publication_request_cancel,
             "publication_request_decide": publication_actions.publication_request_decide,
-            "publication_publish": publication_actions.publication_publish,
             "publication_request_list": publication_actions.publication_request_list,
         }
 
@@ -54,7 +52,7 @@ class UmssPlugin(plugins.SingletonPlugin):
 
         * the three **chained** functions that guard core's action names — the
           wall — whose rule and measurements live in `ckanext.umss.auth`;
-        * the five plain functions that authorize this extension's own actions
+        * the four plain functions that authorize this extension's own actions
           (D4).
 
         CKAN raises `ValueError('Authorization function not found: ...')` for an
@@ -68,7 +66,6 @@ class UmssPlugin(plugins.SingletonPlugin):
             "publication_request_create": publication_auth.publication_request_create,
             "publication_request_cancel": publication_auth.publication_request_cancel,
             "publication_request_decide": publication_auth.publication_request_decide,
-            "publication_publish": publication_auth.publication_publish,
             "publication_request_list": publication_auth.publication_request_list,
         }
 
@@ -93,17 +90,16 @@ class UmssPlugin(plugins.SingletonPlugin):
         * `bulk_update_delete` soft-deletes through
           `_bulk_update_dataset(..., {'state': 'deleted'})`, which loops
           `package_patch` -> `package_update`; the core interface's own
-          docstring warns that this callback is bypassed. The wall now refuses
-          an organization administrator's `state` change — the very caller who
+          docstring warns that this callback is bypassed. The wall refuses an
+          organization administrator's `state` change — the very caller who
           owns the decision queue — so that admin's `bulk_update_delete` is
           refused before it removes the dataset, and it cannot orphan a
-          `pending` row that way. What remains reachable is the sysadmin's own
-          `bulk_update_delete`, which the wall leaves to the stock bypass: none
-          of its chains sets `auth_sysadmins_check`, so CKAN short-circuits a
-          sysadmin to success before the rule runs. This closing is the `No
-          Other Visibility Path` requirement's — no API-reachable action may
-          change a dataset's `private` **or** its `state` — carried by the
-          wall.
+          `pending` row that way. The sysadmin's `bulk_update_delete` is
+          deliberately allowed: administering `state` is not publishing, and
+          the wall refuses a `state` change only below a sysadmin. That path
+          does bypass this hook, so a sysadmin's bulk delete can still leave a
+          `pending` row behind — the one remaining hole, and it is the
+          preserved capability rather than a publication.
 
         This hook covers the ordinary `package_delete` path the requirement
         names.
