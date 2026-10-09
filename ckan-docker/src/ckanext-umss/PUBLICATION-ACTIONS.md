@@ -63,7 +63,7 @@ The bypasses that remain are named individually under *Named bypasses* below.
 
 | Action | Arguments | Returns | Authorized to |
 |---|---|---|---|
-| `publication_request_create` | `dataset_id`, `comments?` | the row | a caller who can `update_dataset` in the owning org, on a **private** dataset. Idempotent: answers the existing `pending` row |
+| `publication_request_create` | `dataset_id` (an id **or** a name), `comments?` | the row — `dataset_id` as stored, see rule 9 | a caller who can `update_dataset` in the owning org, on a **private** dataset. Idempotent: answers the existing `pending` row |
 | `publication_request_cancel` | `request_id` | the row | the requester, or an org `admin` |
 | `publication_request_decide` | `request_id`, `approve` (bool), `comments?` | the row | an `admin` of the owning org, an `admin` of a **parent** org, or a `sysadmin` — **never the requester** |
 | `publication_request_list` | `status?` | a list of rows | **any caller may invoke it**: the auth function returns `success: True` unconditionally, and the **action body** narrows the result to what the caller may see (`_datasets_by_id` resolves every dataset's owner org and both titles in one query, the `update_dataset` capacity is evaluated once per organisation, plus the caller's own rows). An anonymous caller is **not** refused before the auth function runs (the same mechanism as rule 7): measured, an anonymous call reached the body and returned a `500` because the dev database has no store table, not a `403` |
@@ -161,6 +161,22 @@ The bypasses that remain are named individually under *Named bypasses* below.
 8. **`publication_request_list` is a GET** (`side_effect_free`). It narrows the answer to what the
    caller may see: the stock `update_dataset` capacity on the dataset's org (which cascades down the
    organization hierarchy), plus the caller's own requests.
+9. **`dataset_id` answers the value the row holds, and the two forms coexist.** `create` accepts a name
+   — CKAN's own convention, `Package.get` takes an id **or** a name — and stores the **canonical id**
+   (`dataset.id`), which is what every row written since the canonicalisation carries. Rows written
+   before it carry the **name** their caller used, and they are deliberately **not migrated**: the read
+   path keys its resolver by **both** forms, so a name-valued row still resolves for the visibility
+   predicate and for both presentation titles. What comes back in `dataset_id` is therefore the **stored
+   value, never a normalised one** — pinned by `test_a_legacy_row_stored_by_name_is_still_resolved`,
+   which asserts the name is what comes back, and by `test_create_stores_the_canonical_id_when_called_by_name`
+   for the write half.
+
+   **Consequence for a consumer: do not key on `dataset_id`.** Comparing it against the dataset's name,
+   or against its id, is wrong for one of the two forms; resolve the dataset instead, since
+   `package_show` takes either. This is not hypothetical: it is the same defect this store closed
+   internally on 2026-10-08 — where the queue resolved by id while rows held a name and the approver saw
+   an empty queue — relocated to the other side of the border. Whether a given client does that is that
+   client's measurement, not assumed here.
 
 ### Two publish-denial messages, two rules
 
