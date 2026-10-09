@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 set -e
-ROOT="$(dirname ${BASH_SOURCE[0]})/.."
+ROOT_SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+. "${ROOT_SELF}/_common.sh"
 if [[ "$(uname)" == "Darwin" ]]; then
   # macOS
 	USERGROUP="$(stat -f '%u:%g' "${ROOT}/src")"
@@ -9,6 +10,6 @@ else
 	USERGROUP="$(stat -c '%u:%g' "${ROOT}/src")"
 fi
 
-docker compose -f "${ROOT}/../docker-compose.dev.unified.yml" exec -u "$USERGROUP" \
+docker compose -f "$COMPOSE_FILE" exec -u "$USERGROUP" \
 	-e HOME=/srv/app/src_extensions ckan-dev ckan generate extension \
 	--output-dir /srv/app/src_extensions

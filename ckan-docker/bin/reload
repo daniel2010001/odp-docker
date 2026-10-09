@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 set -e
-ROOT="$(dirname ${BASH_SOURCE[0]})/.."
+ROOT_SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+. "${ROOT_SELF}/_common.sh"
 
-docker compose -f "${ROOT}/../docker-compose.dev.unified.yml" exec ckan-dev \
+docker compose -f "$COMPOSE_FILE" exec ckan-dev \
 	bash -c 'kill $(ls -l /proc/*/exe | grep bin/python | grep -Po '"'"'/proc/\K[^/]*'"'"')'
