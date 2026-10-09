@@ -183,6 +183,45 @@ def test_editor_full_package_update_flipping_private_is_refused(scene):
     assert stored(scene["dataset"]["id"])["private"] is True
 
 
+def test_editor_package_revise_private_false_is_refused(scene):
+    """The wall's coverage claim names `package_revise` explicitly — it delegates
+    to `package_update`'s auth and passes the **fully revised dict**, which carries
+    `id`, so the wall sees the request — and until this test nothing proved it.
+    Measured here end to end: the refusal is the wall's own message, and the
+    stored `private` does not move."""
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(scene["editor"], "package_revise",
+                match={"id": scene["dataset"]["id"]},
+                update={"private": False})
+    assert umss_auth.PUBLISH_DENIED_MSG in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+def test_sysadmin_package_revise_private_false_is_refused(scene, store):
+    """Same route, the caller the 2026-10-08 decision closed too. Without
+    `auth_sysadmins_check` CKAN short-circuits a sysadmin to success *before* the
+    wall runs, and the revised dict would reach persistence."""
+    with pytest.raises(logic.NotAuthorized) as excinfo:
+        call_as(factories.Sysadmin(), "package_revise",
+                match={"id": scene["dataset"]["id"]},
+                update={"private": False})
+    assert umss_auth.PUBLISH_VIA_FLOW_MSG in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert publication_rows(scene["dataset"]["id"]) == []
+
+
+def test_package_revise_of_metadata_only_is_still_allowed(scene):
+    """The other half, and the reason the pair matters: the wall refuses the
+    **publication transition**, not the action. A revise that touches nothing but
+    metadata still succeeds, so `package_revise` keeps being usable for its own
+    purpose."""
+    revised = call_as(scene["editor"], "package_revise",
+                      match={"id": scene["dataset"]["id"]},
+                      update={"title": "Revise is not a publication"})
+    assert revised["package"]["title"] == "Revise is not a publication"
+    assert stored(scene["dataset"]["id"])["title"] == "Revise is not a publication"
+
+
 def test_sysadmin_stock_package_patch_is_refused_and_writes_nothing(scene, store):
     """The closed route, not the old bypass. This test used to pin the
     sysadmin's unrecorded stock escape: CKAN short-circuits a sysadmin before any
