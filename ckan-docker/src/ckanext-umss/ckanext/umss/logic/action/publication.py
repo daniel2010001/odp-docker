@@ -27,12 +27,16 @@ and `patch.py` never sets it. `model.repo.commit` is `model.Session.commit`
 committed by the flip's own commit, and the trailing `_Session.commit()` below
 is a second, no-op commit.
 
-The `either both writes or neither` claim (A2.5) is measured only for a failure
-**before** that commit: `_commit_row`'s rollback then discards the staged row. A
-failure **after** `model.repo.commit()` — between it and the end of the action —
-is **unproven**: the flip is already durable and the rollback can no longer undo
-the row. This docstring does not claim otherwise, and no mechanism for that
-window is invented here.
+The `either both writes or neither` claim (A2.5) is measured for the first
+window and for the point of the second window that the second-window test makes
+the code fail at. A failure **inside `_commit_row`'s `try` and before**
+`model.repo.commit()` is rolled back there: its rollback discards the staged row. A failure **right after** that
+commit -- the point the second-window test raises at -- does not split the pair
+either: the staged row rode the flip's own commit, so both writes are already
+durable and what the caller receives is an error over that durable state. A
+failure later in the same path (the trailing `_Session.commit()`,
+`_Session.expire_all()`, `_row_dict`) is **not separately measured**; it follows
+from the same already-landed commit, and no separate claim is made for it.
 
 `requested_by` and `approved_by` hold **user ids**, CKAN's convention
 (`package_show` answers `creator_user_id`).
@@ -224,11 +228,14 @@ def _commit_row(row, context, flip=False):
     `package_patch` commits the session it is handed (`update.py:451`), and that
     session is this module's `_Session`, so the row staged here is committed by
     the flip's own commit rather than by the trailing `_Session.commit()`. What
-    the rollback guarantees is the window **before** that commit: a failure
-    there discards the staged row and re-raises, so a row cannot survive a flip
-    that never committed. A failure **after** the commit is not rolled back —
-    the flip is already durable — so the "either both writes or neither" claim
-    (A2.5) is measured for the first window and **unproven** for the second.
+    the rollback guarantees is the window **inside that `try` and before** that
+    commit: a failure there discards the staged row and re-raises, so a row
+    cannot survive a flip that never committed. A failure **after** the commit is not rolled back —
+    the flip is already durable — and it does not split the pair either: the row
+    staged here rode the flip's own commit, so both writes are durable when the
+    caller receives the error (A2.5; the second-window test measures the point
+    immediately after the commit, and any later point follows from that same
+    landed commit rather than from a measurement of its own).
     """
     _Session.add(row)
     try:
