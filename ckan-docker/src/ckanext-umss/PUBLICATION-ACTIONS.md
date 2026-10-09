@@ -173,10 +173,13 @@ The bypasses that remain are named individually under *Named bypasses* below.
 
    **Consequence for a consumer: do not key on `dataset_id`.** Comparing it against the dataset's name,
    or against its id, is wrong for one of the two forms; resolve the dataset instead, since
-   `package_show` takes either. This is not hypothetical: it is the same defect this store closed
-   internally on 2026-10-08 — where the queue resolved by id while rows held a name and the approver saw
-   an empty queue — relocated to the other side of the border. Whether a given client does that is that
-   client's measurement, not assumed here.
+   `package_show` takes either. This is not hypothetical, and it does not point only one way: the same
+   defect this store closed internally on 2026-10-08 — the queue resolved by id while rows held a name,
+   and the approver saw an empty queue — appeared on the consuming side too, **in the opposite
+   direction**: the portal's record filter compared the field against the **id** of the loaded dataset,
+   so the rows holding a **name** rendered nothing — invisible in the record while the queue showed
+   them. It now accepts both forms. *(Reported by the portal session on 2026-10-09; the client side is
+   not measured from this repository.)*
 
 ### Two publish-denial messages, two rules
 
