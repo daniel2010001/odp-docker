@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -e
-ROOT="$(dirname ${BASH_SOURCE[0]})/.."
+ROOT_SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+. "${ROOT_SELF}/_common.sh"
 
-docker compose -f "${ROOT}/../docker-compose.dev.unified.yml" restart ckan-dev
+docker compose -f "$COMPOSE_FILE" restart ckan-dev

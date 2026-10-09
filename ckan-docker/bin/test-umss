@@ -21,15 +21,15 @@
 # Uso: bin/test-umss [argumentos extra para pytest...]
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE="${ROOT}/../docker-compose.dev.unified.yml"
+ROOT_SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+. "${ROOT_SELF}/_common.sh"
 
-if [[ ! -f "$COMPOSE" ]]; then
-	echo "test-umss: no encuentro ${COMPOSE}" >&2
+if [[ ! -f "$COMPOSE_FILE" ]]; then
+	echo "test-umss: no encuentro ${COMPOSE_FILE}" >&2
 	exit 1
 fi
 
-docker compose -f "$COMPOSE" exec -T ckan-dev bash -lc '
+docker compose -f "$COMPOSE_FILE" exec -T ckan-dev bash -lc '
 set -euo pipefail
 
 # Derivar el destino de test del último SEGMENTO del path, no del string
