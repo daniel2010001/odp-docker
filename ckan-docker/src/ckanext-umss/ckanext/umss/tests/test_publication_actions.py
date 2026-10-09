@@ -686,7 +686,8 @@ def test_create_loses_the_race_by_returning_the_winners_row(scene, store, monkey
 
 
 # ---------------------------------------------------------------------------
-# A2.5 — the record and the flip are one transaction (D5's "asserted, not measured")
+# A2.5 — the record and the flip are one transaction (D5's "asserted, not
+# measured", now measured for the first window and for the post-commit point)
 # ---------------------------------------------------------------------------
 
 
@@ -727,6 +728,59 @@ def test_a_failed_flip_on_decide_leaves_no_approved_row_behind(scene, store, fai
     assert row.decided_at is None
     assert row.consumed_at is None
     assert stored(scene["dataset"]["id"])["private"] is True
+
+
+@pytest.fixture
+def late_failing_flip(monkeypatch):
+    """Make the door's flip fail **after** its own commit, which is the window
+    `_commit_row`'s rollback can no longer undo.
+
+    The `package_patch` the action is handed is the **real** one — captured
+    before the patch and called with the same arguments — so its own commit
+    lands first and only then does the wrapper raise. Patches the entry point
+    the action itself uses — `toolkit.get_action`.
+    """
+    real_get_action = toolkit.get_action
+    real_package_patch = real_get_action("package_patch")
+
+    def get_action(name):
+        if name == "package_patch":
+
+            def after_commit(context, data_dict):
+                real_package_patch(context, data_dict)
+                raise toolkit.ValidationError({"private": ["the flip failed late"]})
+
+            return after_commit
+        return real_get_action(name)
+
+    monkeypatch.setattr(toolkit, "get_action", get_action)
+
+
+def test_a_flip_failing_after_its_own_commit_leaves_the_pair_whole(
+    scene, store, late_failing_flip
+):
+    """The second window A2.5 never measured: here the wrapper raises **after**
+    the real `package_patch` has already committed.
+
+    Measured, not asserted: the row survives as `approved` with both stamps and
+    the dataset is public, so the pair does not split. What the caller receives
+    is an error over a durable state.
+    """
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.ValidationError):
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    row = the_row(scene["dataset"]["id"])
+    assert row.status == "approved"
+    assert row.decided_at is not None
+    assert row.consumed_at is not None
+    assert stored(scene["dataset"]["id"])["private"] is False
 
 
 # ---------------------------------------------------------------------------
