@@ -52,8 +52,10 @@ A ``state`` change is covered wherever it is actually reachable: a full
 'package_change_state' not found`` — so naming it as a covered action would be
 naming a route no API caller can take. It survives only as an auth function this
 CKAN references from the ``ignore_not_package_admin`` validator
-(``ckan/logic/validators.py:560``); that validator reaches this same chain, so
-nothing is lost by dropping the name as an action.
+(``ckan/logic/validators.py``,
+``logic.check_access('package_change_state',context, {"id": pkg.id})``); that
+validator reaches this same chain, so nothing is lost by dropping the name as an
+action.
 
 Three properties keep this safe rather than clever:
 
@@ -263,9 +265,11 @@ def package_create(next_auth, context, data_dict):
 
     At **create** time an absent ``private`` is *not* "keep what is stored":
     ``private`` sits in the schema's ``ignore_missing`` chain
-    (``ckan/logic/schema.py:160-161``), so an omitted key falls through to the
-    column default, and ``Column('private', types.Boolean, default=False)``
-    (``ckan/model/package.py:75``) makes that default **public**. An omitted key
+    (``ckan/logic/schema/__init__.py``,
+    ``'private': [ignore_missing, boolean_validator,``), so an omitted key falls
+    through to the column default, and ``Column('private', types.Boolean,
+    default=False)`` (``ckan/model/package.py``) makes that default **public**.
+    An omitted key
     is therefore a publication attempt, exactly like an explicit ``False``. Only
     an explicit value that core reads as ``True`` may defer here — creation is
     private for **everyone**, the organization ``admin`` included, because the
@@ -302,7 +306,8 @@ def bulk_update_public(next_auth, context, data_dict):
 
     Measured on the running CKAN 2.12.0 (``/srv/app/src/ckan``, commit
     ``0058b2eb``), ``_bulk_update_dataset`` loops ``_get_action('package_patch')``
-    (``ckan/logic/action/update.py:1200-1216``) and therefore **does** reach
+    (``ckan/logic/action/update.py``, ``_get_action('package_patch')(``)
+    and therefore **does** reach
     ``package_update``. An earlier version of this docstring claimed the
     opposite; it was reading a stale CKAN ``2.12.0a0`` checkout whose loop ran a
     direct ``model.Session.query(...).update(...)``.
@@ -313,8 +318,9 @@ def bulk_update_public(next_auth, context, data_dict):
     an attributable message of ours rather than core's. It also holds if that
     inner loop ever changes back to a direct write, which the ``package_update``
     chain alone would not see. Core's own auth for this action is a *separate*
-    function (``ckan/logic/auth/update.py:262-269``) that checks only
-    ``has_user_permission_for_group_or_org(org_id, user, 'update')`` — a
+    function (``ckan/logic/auth/update.py``,
+    ``authorized = authz.has_user_permission_for_group_or_org(``) that checks
+    only ``has_user_permission_for_group_or_org(org_id, user, 'update')`` — a
     permission the ``editor`` role does not carry but the ``admin`` role does.
 
     No caller may use this action: it is a publication path

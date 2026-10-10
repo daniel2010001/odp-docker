@@ -17,13 +17,17 @@ door.
 
 They write the record and flip the value in one commit (D5) because
 `package_patch` commits the session it is handed. Measured against the CKAN
-source: `package_patch` (`ckan/logic/action/patch.py:17`) delegates to
-`package_update` (`ckan/logic/action/update.py:234`), which calls
-`model.repo.commit()` at `update.py:451` unless `context['defer_commit']` is set,
-and `patch.py` never sets it. `model.repo.commit` is `model.Session.commit`
-(`ckan/model/__init__.py:204`, `:400`), the same session this module holds as
-`_Session`, and `package_patch`'s context is given that session by
-`_prepopulate_context` (`ckan/logic/__init__.py:313`). So the staged row is
+source: `package_patch` (`ckan/logic/action/patch.py`,
+`_get_action('package_update')(update_context, patched)`) delegates to
+`package_update` (`ckan/logic/action/update.py`, `def package_update(`), which
+calls `model.repo.commit()` (`ckan/logic/action/update.py`,
+`model.repo.commit()`) unless `context['defer_commit']` is set, and `patch.py`
+never sets it. `model.repo.commit` is `model.Session.commit`
+(`ckan/model/__init__.py`, `self.commit = session.commit` and
+`repo = Repository(meta.metadata, meta.Session)`), the same session this module
+holds as `_Session`, and `package_patch`'s context is given that session by
+`_prepopulate_context` (`ckan/logic/__init__.py`,
+`context.setdefault('session', model.Session)`). So the staged row is
 committed by the flip's own commit, and the trailing `_Session.commit()` below
 is a second, no-op commit.
 
@@ -225,8 +229,9 @@ def _flip_to_public(context, dataset_id):
 def _commit_row(row, context, flip=False):
     """Write the record and, when asked, the flip — in one commit.
 
-    `package_patch` commits the session it is handed (`update.py:451`), and that
-    session is this module's `_Session`, so the row staged here is committed by
+    `package_patch` commits the session it is handed
+    (`ckan/logic/action/update.py`, `model.repo.commit()`), and that session is
+    this module's `_Session`, so the row staged here is committed by
     the flip's own commit rather than by the trailing `_Session.commit()`. What
     the rollback guarantees is the window **inside that `try` and before** that
     commit: a failure there discards the staged row and re-raises, so a row
@@ -341,7 +346,8 @@ def publication_request_list(context, data_dict):
 
     "May see" is the stock `update_dataset` capacity on the dataset's org, plus
     the caller's own requests. The predicate stays in Python on purpose: the
-    stock helper walks the org hierarchy (`ckan/authz.py:302`), and re-writing
+    stock helper walks the org hierarchy (`ckan/authz.py`,
+    `def has_user_permission_for_group_or_org(`), and re-writing
     that walk in SQL is how a queue starts showing rows to the wrong org. The
     cost is not per row, though — one query resolves every dataset's org and the
     capacity is evaluated once per organization (R4-list-unbounded).

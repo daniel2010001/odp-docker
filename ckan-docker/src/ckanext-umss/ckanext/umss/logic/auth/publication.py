@@ -3,7 +3,8 @@ Authorization for the four publication actions: `design.md` D4.
 
 Every predicate here is the **stock** CKAN capacity, reused: the extension
 defines no permission of its own. `has_user_permission_for_group_or_org`
-(`ckan/authz.py:302`) already answers the sysadmin short-circuit and the cascade
+(`ckan/authz.py`, `def has_user_permission_for_group_or_org(`) already answers
+the sysadmin short-circuit and the cascade
 down the organization hierarchy, which is why a parent org's admin can decide a
 child org's request.
 
@@ -179,9 +180,11 @@ def publication_request_decide(context, data_dict):
 
     `auth_sysadmins_check` is load-bearing, not decoration. Without it CKAN
     short-circuits every sysadmin to success *before* this function runs
-    (`ckan/authz.py:224-228`), leaving the rule written, green and hollow for
-    exactly the caller it does not exempt. With it, the function runs for a
-    sysadmin too, so it must answer for that caller explicitly.
+    (`ckan/authz.py`,
+    `if not getattr(auth_function, 'auth_sysadmins_check', False):`), leaving
+    the rule written, green and hollow for exactly the caller it does not
+    exempt. With it, the function runs for a sysadmin too, so it must answer for
+    that caller explicitly.
     """
     row = _request_row(data_dict.get("request_id"))
     if row is None:
