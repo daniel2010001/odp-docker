@@ -17,6 +17,7 @@ once so both sides read it from the same place.
 | **`unit/no-direct-publish`** (2026-10-08) | **the author's decision that no caller publishes directly, the `sysadmin` included.** `publication_publish` is **retired from the registry** — a caller of that name gets CKAN's own `400 "Bad request: Action name not known"`, which is the form the author chose over a tombstone that refuses forever; the wall declares `auth_sysadmins_check` on **all three** functions, so it **runs for a `sysadmin`** and refuses the visibility transition for them too, while `state` administration stays the `sysadmin`'s **deliberately** (closing it was never asked for). **Four actions, eight labels.** The label *values* do not change; the **message** is now chosen by fact — a caller the flow authorizes (org `admin` **or** `sysadmin`) reads `Publication flow`, everyone else `Publish denied` — and `Publish denied`'s sentence was corrected, because "only an organization administrator can publish a dataset" became false. *(The native gate on this unit **escalated**: a **CRITICAL** resilience finding states this very consequence — a requester who loses capacity, or who is the only approver, leaves a request nobody can decide, so that dataset never publishes. The maintainer **accepted it on 2026-10-08** as the **declared limitation** of the decision, not as an open defect; the review switch is off for this clone and delivery follows ordinary repository policy.)* |
 | **`unit/titles-and-labels`** | **delivered and merged** to `master` in the PR #4 (`02893f7`), natively reviewed (`review-6a40aaa7e5a3b385`, tier high, 4/4 lenses, approved and acknowledged, authority burned; 3 informational findings) and CI green (run `37705879038`): the returned rows also carry `dataset_title` / `organization_title` (resolved in the same single query as the owner organisation, with the names' `None` / `"unknown"` fallbacks), and every refusal below reads `<frozen label>: <free prose>` with the labels declared as constants and pinned by test |
 | **`unit/labels-outside-translation`** | the label of every refusal is now composed **outside** `toolkit._(...)`, so the part a consumer matches no longer sits inside a translatable unit; the wall's two sentences stay translated. The label **values** are unchanged (nine at the time; **eight** since 2026-10-08, when the retired action's `Not a sysadmin` went with it). Guarded by a **structural** test, because the defect is invisible to behaviour — see *What is translated, and what is matched* below |
+| **`unit/publication-self-approval`** (2026-10-15) | **the author's decision that self-approval is allowed exactly where nobody else can approve** — the exception this file calls `c′`: four eyes stops being "the requester never decides their own request" and becomes "the requester does not decide it **while another person of the owning organization could**". The count is measured over the owning organization's **`active` `admin` member rows**, read as **memberships** and never as effective permissions (the cascade is on in this stack, so a permission-shaped question would count a **related** organization's admin), and the platform's **sysadmins do not count**: CKAN makes the creator of an organization its `admin` member, so counting them would leave every organization's admin unable to approve their own request. The four faces also return the computed key **`decidable_by_caller`** (rule 10), which is the decide predicate's own verdict for the caller reading the row |
 | The review of record (**relayed**) | lineage `review-4b6ecc112fa966fa`, tier **high**, **4/4 lenses**, **approved and acknowledged**; the review authority is burned; the **9 findings are informational**, none blocking, none reopening the lineage, and they are declared as later work at the end of this file. This metadata is **relayed** from the provider's review envelope and from the state file read before acknowledgement — it is **not reproducible from the repository now** |
 | The governance amendment | `odp` commit `41de6c2`, `design.md:194,207` and `spec.md:284,586` |
 | The unit's state and what it must carry | `HANDOFF-2026-10-07.md` (tracked, repository root) |
@@ -65,7 +66,7 @@ The bypasses that remain are named individually under *Named bypasses* below.
 |---|---|---|---|
 | `publication_request_create` | `dataset_id` (an id **or** a name), `comments?` | the row — `dataset_id` as stored, see rule 9 | a caller who can `update_dataset` in the owning org, on a **private** dataset. Idempotent: answers the existing `pending` row |
 | `publication_request_cancel` | `request_id` | the row | the requester, or an org `admin` |
-| `publication_request_decide` | `request_id`, `approve` (bool), `comments?` | the row | an `admin` of the owning org, an `admin` of a **parent** org, or a `sysadmin` — **never the requester** |
+| `publication_request_decide` | `request_id`, `approve` (bool), `comments?` | the row | an `admin` of the owning org, an `admin` of a **parent** org, or a `sysadmin`. The requester **cannot decide their own request while another person of the owning organization could**; since 2026-10-15 (rule 5, the `c′` exception) a requester who is that organization's **only** approver **may** decide it, which is what unblocks a single-person organization. A `sysadmin` is never that "other person" |
 | `publication_request_list` | `status?` | a list of rows | **any caller may invoke it**: the auth function returns `success: True` unconditionally, and the **action body** narrows the result to what the caller may see (`_datasets_by_id` resolves every dataset's owner org and both titles in one query, the `update_dataset` capacity is evaluated once per organisation, plus the caller's own rows). An anonymous caller is **not** refused before the auth function runs (the same mechanism as rule 7): measured, an anonymous call reached the body and returned a `500` because the dev database has no store table, not a `403` |
 
 ## The rules that are not visible in the names
@@ -115,7 +116,13 @@ The bypasses that remain are named individually under *Named bypasses* below.
    natural `title ?? fallback` must not receive an empty string that renders as a blank line.
 4. **`comments` is required when rejecting**, optional when approving.
 5. **The refusal of an approver's own request is distinguishable** (`403` with its own message, the row
-   stays `pending`), never a silent no-op.
+   stays `pending`), never a silent no-op. It is **conditional since 2026-10-15**: it fires when
+   another person of the owning organization could approve the request, and does not fire when the
+   requester is that organization's only approver. The count is of **people of that organization** —
+   the platform's sysadmins are not one of them, by role and not by name — and it is read from `active`
+   `admin` **member rows**, never from effective permissions. `FOUR_EYES_LABEL` and its sentence are
+   unchanged: the exception **grants**, so it emits no label, and the trace of a self-approval is the
+   row itself — `requested_by` equal to `approved_by` — not a new column.
 6. **`annulled` is not `cancelled`:** a pending request is annulled when its object disappears (the
    dataset is deleted, or it became public by another route), and by a direct `publish`. `cancelled` is
    the requester withdrawing. The `motive` column records the trigger as a **cross-repository token**
@@ -180,6 +187,23 @@ The bypasses that remain are named individually under *Named bypasses* below.
    so the rows holding a **name** rendered nothing — invisible in the record while the queue showed
    them. It now accepts both forms. *(Reported by the portal session on 2026-10-09; the client side is
    not measured from this repository.)*
+10. **The row also answers whether the caller may decide it** (`decidable_by_caller`, 2026-10-15). It
+    is not a stored column: it is the decide predicate's own verdict for the caller reading the row —
+    `True` for an approver who may decide that request **now**, the requester included exactly when
+    rule 5's exception applies, `False` for anyone else and for a row that is no longer `pending`,
+    because the action refuses a settled request with its `409`. All four faces answer it, so a
+    consumer renders the offer, or its absence, without owning the rule and without a second call;
+    `requested_by` rides the row, so wording the offer differently for the requester is comparing two
+    ids, not a policy. **Its cost is stated as two different shapes, not as "no
+    query added":** the **other-approver** count of every organization the page
+    is about is **one** statement for the page (pinned by
+    `test_list_measures_the_other_approvers_in_one_query_for_the_whole_page`),
+    while the requester's **capacity** question — the decision's first gate,
+    which the list did not ask at all before this key existed — is asked **per
+    distinct `(requester, organization)` pair**: once for a page where one person
+    requested several datasets in one organization, once per requester for a page
+    of N different requesters. It cannot be batched without re-writing the stock
+    hierarchy walk the predicate deliberately reuses.
 
 ### Two publish-denial messages, two rules
 
@@ -236,8 +260,8 @@ illustrative prose.
 
 | label | module | message (the sentence is free) | fires when |
 |---|---|---|---|
-| `Four eyes` | `logic/auth/publication.py` | `"Four eyes: the approver cannot be the requester of the request they decide"` | `publication_request_decide` is called by the request's own requester who **has** the admin capacity the decision demands — for an org `admin` **and** for a `sysadmin`, which has no exception. The row stays `pending` |
-| `Requester capacity` | `logic/auth/publication.py` | `"Requester capacity: the requester can no longer update this dataset, so the request cannot be decided"` | `publication_request_decide` is called while the requester's **current** capacity on the dataset's **current** owner is gone; checked **before** four eyes and before the sysadmin branch, so it has no sysadmin exception either. Reachable by HTTP from a buildable state *(**measured live on 2026-10-08**: the consuming probe built it — a `pending` row whose requester's membership was removed, decided by a **`sysadmin`** — and read `403 Requester capacity`, not `Four eyes`, confirming the order below; the probe then cancelled the request, which is this row's mandated exit)*: a `pending` row whose requester's membership was removed after it was created, or a requester with no user row, or an unresolvable owning organisation; decided by any approver. Mind the order: this check runs **before** four eyes, so an approver reading it gets `Requester capacity` and **not** `Four eyes`. With the direct path retired (2026-10-08) there is **no escape hatch**: no caller, the `sysadmin` included, can decide such a request, so it stays `pending` until the requester cancels it. A consumer's queue must therefore offer `publication_request_cancel` rather than a retry, and a request whose requester is the only approver can never be decided — the **declared limitation** of this capability, not an open defect |
+| `Four eyes` | `logic/auth/publication.py` | `"Four eyes: the approver cannot be the requester of the request they decide"` | `publication_request_decide` is called by the request's own requester who **has** the admin capacity the decision demands — for an org `admin` **and** for a `sysadmin`, which has no exception — **and another person of the owning organization could approve it**. Since 2026-10-15 that second half is what decides: a requester who is that organization's only approver is **granted** instead, and a `sysadmin` is not counted as the other person. The row stays `pending` |
+| `Requester capacity` | `logic/auth/publication.py` | `"Requester capacity: the requester can no longer update this dataset, so the request cannot be decided"` | `publication_request_decide` is called while the requester's **current** capacity on the dataset's **current** owner is gone; checked **before** four eyes and before the sysadmin branch, so it has no sysadmin exception either. Reachable by HTTP from a buildable state *(**measured live on 2026-10-08**: the consuming probe built it — a `pending` row whose requester's membership was removed, decided by a **`sysadmin`** — and read `403 Requester capacity`, not `Four eyes`, confirming the order below; the probe then cancelled the request, which is this row's mandated exit)*: a `pending` row whose requester's membership was removed after it was created, or a requester with no user row, or an unresolvable owning organisation; decided by any approver. Mind the order: this check runs **before** four eyes, so an approver reading it gets `Requester capacity` and **not** `Four eyes`. With the direct path retired (2026-10-08) there is **no escape hatch**: no caller, the `sysadmin` included, can decide such a request, so it stays `pending` until the requester cancels it. A consumer's queue must therefore offer `publication_request_cancel` rather than a retry. A request whose requester is the only approver **could not** be decided — the **declared limitation** until 2026-10-15, when the `c′` exception lifted exactly that case and made it decidable by its own requester (see the `Four eyes` row and rule 5). What this row still covers is a requester whose **capacity is gone**, which the exception does not touch: the count of other approvers is irrelevant when the requester can no longer update the dataset |
 | `Not an approver` | `logic/auth/publication.py` | `"Not an approver: only an organization administrator may decide a publication request"` | the caller is not an org `admin` (owning or parent) and not a `sysadmin`; for a non-sysadmin this branch runs **before** the four-eyes branch |
 | `Already public` | `logic/auth/publication.py` | `"Already public: that dataset is already public"` | `publication_request_create` on an already-public dataset — the flip would be a no-op and the caller would only pile up `approved` rows |
 | `Cannot request` | `logic/auth/publication.py` | `"Cannot request: only a user who can update this dataset may ask for it to be published"` | `publication_request_create` is called by a caller who cannot `update_dataset` in the dataset's owning organisation |
@@ -345,15 +369,18 @@ reworded.
 branch, not the second message.** Counted as labels there are already **eight**; counted as places
 where the consumer must **change behaviour** there is exactly **one** — four eyes, where the refusal
 means "you cannot decide your own request" and the portal must route elsewhere rather than merely
-display the text. One case is an exception, two cases are a shape; the day a second branch appears,
+display the text. Since 2026-10-15 that one place is also **conditional and computed**: rather than
+re-deriving it, a consumer reads `decidable_by_caller` off the row (rule 10). One case is an exception, two cases are a shape; the day a second branch appears,
 the token is designed **before** the branch is wired, not after. Until then the eight labels stay
 pinned text, and this file stays the single point the consumer's constant points at.
 
 **The precedence of the three decide-path labels is measured, not asserted.** The decide path alone
 carries `Requester capacity`, `Not an approver` and `Four eyes`, all `403`. They are ordered: the
 requester's **current capacity** is checked first, then (for a non-sysadmin) the approver capacity,
-and only then four eyes. `Four eyes` therefore appears only for a requester who **has** the admin
-capacity the decision demands; a requester who lost it answers `Requester capacity`
+and only then four eyes — which, since 2026-10-15, fires only when another person of the owning
+organization could approve. `Four eyes` therefore appears only for a requester who **has** the admin
+capacity the decision demands **and** has another person able to approve it; a requester who lost it
+answers `Requester capacity`
 (`test_the_decide_path_checks_capacity_before_four_eyes`), and a non-approver requester answers
 `Not an approver` (`test_a_non_approver_requester_gets_not_an_approver_not_four_eyes`).
 
@@ -398,7 +425,11 @@ running CKAN 2.12.0 (`/srv/app/src/ckan`, `0058b2eb…`) or marked as **relayed*
   a requester id with **no user row at all**, or on the requester's membership being gone — not on the
   user row being soft-deleted. The residual hole — a soft-deleted user who somehow keeps an active
   membership — is narrow: `user_delete` also deletes the memberships, so it needs hand-built DB state,
-  a migration, or re-adding the deleted user with `member_create`.
+  a migration, or re-adding the deleted user with `member_create`. That same hand-built state is where
+  the `c′` exception's fail-closed direction lives: a membership whose user row does not resolve at all
+  is neither a person nor an absence, so the count reads it as an approver it **cannot rule out** and
+  four eyes stays. `member.table_id` carries no foreign key, so the schema admits the row even though
+  no action here writes one.
 
 **The wall's intended exceptions and its one config-gated gap** (API-reachable writers of
 `private`/`state` the wall does not refuse):
@@ -422,9 +453,9 @@ running CKAN 2.12.0 (`/srv/app/src/ckan`, `0058b2eb…`) or marked as **relayed*
   publish, and since 2026-10-08 it is the **only** one at all: `publication_publish` was the second and
   is retired. The wall refusing this door would make the publication flow impossible. Design, not a gap.
 
-## The four governance deltas this unit carries
+## The governance deltas this file carries
 
-From `odp` `41de6c2`:
+`1`–`4` from `odp` `41de6c2`; `5` is the author's decision of **2026-10-15**.
 
 1. **As delivered:** `publication_publish` is `sysadmin`-only; an org `admin` has **no direct publish
    path through the five actions**. The stock `package_patch {private: false}` route is no longer open
@@ -432,10 +463,18 @@ From `odp` `41de6c2`:
    **Superseded 2026-10-08:** the action is retired and the `sysadmin`'s stock route is closed too —
    **no caller publishes directly**, and `state` administration (not a publication) stays the
    `sysadmin`'s, deliberately.
-2. `decide` is four-eyes: an org `admin` (owning or parent) or a `sysadmin`, **never the requester**.
+2. `decide` is four-eyes: an org `admin` (owning or parent) or a `sysadmin`, **never the requester** —
+   amended by `5`: never **while another person of the owning organization could decide it**.
 3. `comments` is required when rejecting.
 4. The decision **re-checks the current state** — the dataset's current owner and the requester's
    current capacity — and a pending request whose object is gone is **annulled**.
+5. **(2026-10-15) Self-approval is allowed exactly where nobody else can approve.** The requester may
+   decide their own request when the owning organization has no **other** `active` `admin` member
+   besides them — platform sysadmins excluded by role, so no account name and no guess about
+   credentials enters the predicate — and the row says so: `decidable_by_caller` (rule 10). The
+   cascade is untouched and unrelated: a **related** organization's admin keeps the capacity the
+   predicate always gave them (`test_a_parent_org_admin_can_decide_a_child_org_request` is unchanged)
+   and is simply not counted as a second person **of this** organization.
 
 ## Declared later work: the 9 informational findings of `review-4b6ecc112fa966fa`
 

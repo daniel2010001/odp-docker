@@ -157,6 +157,12 @@ CITATIONS = [
         docstring="ckanext/umss/logic/auth/publication.py module docstring",
     ),
     Citation(
+        claim="the creator of an organization becomes an admin member of it",
+        path="ckan/logic/action/create.py",
+        fragment="# creator of group/org becomes an admin",
+        docstring="ckanext/umss/logic/auth/publication.py module docstring",
+    ),
+    Citation(
         claim="authz short-circuits a sysadmin unless auth_sysadmins_check is set",
         path="ckan/authz.py",
         fragment="if not getattr(auth_function, 'auth_sysadmins_check', False):",
