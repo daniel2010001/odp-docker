@@ -44,6 +44,13 @@ from the same already-landed commit, and no separate claim is made for it.
 
 `requested_by` and `approved_by` hold **user ids**, CKAN's convention
 (`package_show` answers `creator_user_id`).
+
+One key of the row is **computed for the caller** and is not a column:
+`decidable_by_caller` (S4) answers whether *this* caller may decide *this* row,
+and it answers through the same rule the decide predicate answers through
+(`logic/auth/publication.py`, `decide_reason`), so a consumer renders the offer
+without owning the policy. It is `False` on a row that is no longer `pending`,
+because the action refuses a settled request.
 """
 from __future__ import annotations
 
@@ -56,7 +63,11 @@ import sqlalchemy as sa
 
 from ckanext.umss import model as umss_model
 from ckanext.umss.logic import caller_id
-from ckanext.umss.logic.auth.publication import UPDATE_PERMISSION
+from ckanext.umss.logic.auth.publication import (
+    UPDATE_PERMISSION,
+    decide_cache,
+    decide_reason,
+)
 
 
 __all__ = [
@@ -73,6 +84,10 @@ _Session = model.Session
 # answers this token, never the raw id. A field called `..._name` must never
 # contain an id.
 UNKNOWN_NAME = "unknown"
+
+# S4's computed key: the decide predicate's verdict for the caller reading the
+# row. Not a column, and not a name — see `_decidable_by_caller`.
+DECIDABLE_KEY = "decidable_by_caller"
 
 
 def _now():
@@ -128,15 +143,44 @@ def _name_key(user_id, names):
     return names.get(user_id, UNKNOWN_NAME)
 
 
-def _row_dict(row, names=None, datasets=None):
+def _decidable_by_caller(row, context, cache=None):
+    """S4: whether **this caller** may decide **this row** — the question a queue
+    and a record card ask before offering the control.
+
+    It is the predicate's verdict, not a flag about four eyes: a non-requester
+    `admin` reads `True` because they may decide it, the requester reads `True`
+    only where no other person of the organization can, and a caller who is not
+    an approver reads `False`.
+
+    `False` for a row that is no longer `pending`: the action refuses a settled
+    request (`409`, "That request is no longer pending"), so `True` there would
+    send a consumer straight to a refusal.
+
+    `requested_by` is on the row, so a consumer that words the offer differently
+    for the requester compares two ids; it does not re-derive a rule.
+    """
+    if row.status != umss_model.PENDING:
+        return False
+    return decide_reason(context, row, cache)[0]
+
+
+def _row_dict(row, context, names=None, datasets=None, cache=None):
     """The row as the API will answer it: the declared columns, keyed by name,
-    plus the presentation fields the portal reads (rule 3).
+    plus the presentation fields the portal reads (rule 3) and the computed
+    `decidable_by_caller` (S4).
+
+    `context` is required because one of those keys is about **the caller**: the
+    four faces answer the same shape, and this is the only key that depends on
+    who is asking.
 
     `names` is the batched user resolution for the whole call (`_names_for`)
     and `datasets` the batched package/organisation resolution
     (`_datasets_by_id`); when either is omitted — a single-row return — it is
     resolved here in one batched query, so one row and a whole page answer the
-    same shape at the same cost per resolver.
+    same shape at the same cost per resolver. `cache` is `decide_cache`'s memo:
+    a page hands in the one it warmed with every organization it is about, so the
+    membership question costs **one** statement for the page instead of one per
+    row.
     """
     data = {column.name: getattr(row, column.name) for column in row.__table__.columns}
     if names is None:
@@ -147,6 +191,7 @@ def _row_dict(row, names=None, datasets=None):
     data["approved_by_name"] = _name_key(row.approved_by, names)
     data["dataset_title"] = _dataset_title(row.dataset_id, datasets)
     data["organization_title"] = _organization_title(row.dataset_id, datasets)
+    data[DECIDABLE_KEY] = _decidable_by_caller(row, context, cache)
     return data
 
 
@@ -251,7 +296,7 @@ def _commit_row(row, context, flip=False):
         _Session.rollback()
         raise
     _Session.expire_all()
-    return _row_dict(row)
+    return _row_dict(row, context)
 
 
 def publication_request_create(context, data_dict):
@@ -270,7 +315,7 @@ def publication_request_create(context, data_dict):
 
     existing = _pending_for(dataset_id)
     if existing is not None:
-        return _row_dict(existing)
+        return _row_dict(existing, context)
 
     row = umss_model.PublicationRequest(
         dataset_id=dataset_id,
@@ -288,7 +333,7 @@ def publication_request_create(context, data_dict):
         # promises. Anything else is a genuine integrity error and is re-raised.
         existing = _pending_for(dataset_id)
         if existing is not None:
-            return _row_dict(existing)
+            return _row_dict(existing, context)
         raise
 
 
@@ -352,6 +397,17 @@ def publication_request_list(context, data_dict):
     cost is not per row, though — one query resolves every dataset's org and the
     capacity is evaluated once per organization (R4-list-unbounded).
 
+    The computed key (S4) costs two things, and they have different shapes. The
+    **other-approver** facts of every organization the page is about are warmed
+    into one `decide_cache` here, so that question is **one statement for the
+    page**. The requester's **capacity** — the decision's first gate, which the
+    predicate asks before anything else — is a **per-row** question: it is
+    memoized per `(requester, organization)` pair, so a page where one person
+    asked for several datasets in one organization pays it once, while a page of
+    N different requesters pays it N times. The list did not ask it at all before
+    this key existed, and it cannot be batched without re-writing the stock
+    hierarchy walk that `may_see` above deliberately reuses.
+
     Declared limitation: every row of the requested status is still
     materialized, because D4's contract has no pagination. If the portal's queue
     needs paging, that is a contract change and it belongs to B2.
@@ -387,7 +443,12 @@ def publication_request_list(context, data_dict):
         for row in visible
         for user_id in (row.requested_by, row.approved_by)
     )
-    return [_row_dict(row, names, datasets) for row in visible]
+    cache = decide_cache(
+        meta["owner_org"] for meta in datasets.values() if meta["owner_org"]
+    )
+    return [
+        _row_dict(row, context, names, datasets, cache=cache) for row in visible
+    ]
 
 
 def _datasets_by_id(dataset_ids):

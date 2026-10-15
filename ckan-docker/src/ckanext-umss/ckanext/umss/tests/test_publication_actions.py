@@ -1516,9 +1516,19 @@ def test_deleting_a_dataset_without_the_store_table_is_a_clean_no_op(scene):
 NAME_KEYS = ("requested_by_name", "approved_by_name")
 TITLE_KEYS = ("dataset_title", "organization_title")
 
+# S4's computed key. It is not a stored column and not a name: it is the decide
+# predicate's own verdict for the caller reading the row, which is why all four
+# faces answer it and none of them owns the rule.
+DECISION_KEYS = ("decidable_by_caller",)
+
 
 def assert_names_present(row):
     for key in NAME_KEYS:
+        assert key in row, (key, sorted(row))
+
+
+def assert_decision_present(row):
+    for key in DECISION_KEYS:
         assert key in row, (key, sorted(row))
 
 
@@ -1600,13 +1610,17 @@ def test_every_action_returns_rows_carrying_both_presentation_names(scene, store
 
 
 def test_the_row_dict_is_additive_over_the_eleven_table_columns(scene, store):
-    """The change adds exactly four keys: the eleven table columns stay, and no
-    other key appears."""
+    """The change adds exactly the additive keys: the eleven table columns stay,
+    and no other key appears. A consumer is allowed to branch on the shape, so a
+    face that grew a key its siblings do not carry is a contract change, and this
+    is where it gets noticed."""
     created = request_for(scene["editor"], scene["dataset"]["id"])
 
     columns = {column.name for column in umss_model.PublicationRequest.__table__.columns}
     assert len(columns) == 11
-    assert set(created) == columns | set(NAME_KEYS) | set(TITLE_KEYS)
+    assert set(created) == (
+        columns | set(NAME_KEYS) | set(TITLE_KEYS) | set(DECISION_KEYS)
+    )
 
 
 def dataset_resolution_selects(statements):
@@ -1980,5 +1994,153 @@ def test_a_single_row_return_resolves_both_ids_in_one_query(scene, store):
 
     user_selects = name_resolution_selects(statements)
     assert len(user_selects) == 1, user_selects
+
+
+# ---------------------------------------------------------------------------
+# S4 — the row carries whether the caller may decide it
+#
+# The portal offers and the catalog decides: the key is the **predicate's own
+# verdict**, computed by the same helper the auth function answers through, so
+# the portal never re-derives the rule. `requested_by` is already on the row, so
+# telling "my own request and I may" apart from "I may as a third party" is
+# comparing two ids, not implementing a policy.
+# ---------------------------------------------------------------------------
+
+
+def other_approver_selects(statements):
+    """The `SELECT ... FROM member LEFT OUTER JOIN "user" ... WHERE
+    member.group_id IN (...)` statements: the only shape the batched membership
+    resolver emits for a page. A single-organization question narrows with
+    `member.group_id = ...` and therefore never matches this shape, which is what
+    keeps this counter on the batching instead of on every membership lookup a
+    call happens to make. `member` is not a reserved word in PostgreSQL, so it is
+    emitted unquoted (unlike `"user"`); whitespace and quotes are normalised the
+    way the other two counters do.
+    """
+    selects = []
+    for statement in statements:
+        flat = " ".join(statement.lower().replace('"', "").split())
+        if " from member left outer join user " in " %s " % flat and (
+            "member.group_id in" in flat
+        ):
+            selects.append(statement)
+    return selects
+
+
+def test_every_action_says_whether_the_caller_may_decide(scene, store):
+    """The four faces answer the same shape, the computed key included: a
+    consumer must never branch on which action produced the row."""
+    editor = scene["editor"]
+    admin = scene["admin"]
+
+    created = call_as(
+        editor, "publication_request_create", dataset_id=scene["dataset"]["id"]
+    )
+    assert_decision_present(created)
+
+    cancelled = call_as(editor, "publication_request_cancel", request_id=created["id"])
+    assert_decision_present(cancelled)
+
+    rejected = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=request_for(editor, scene["second_dataset"]["id"])["id"],
+        approve=False,
+        comments="no",
+    )
+    assert_decision_present(rejected)
+
+    approved = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=request_for(editor, fresh_dataset(scene)["id"])["id"],
+        approve=True,
+    )
+    assert_decision_present(approved)
+
+    listed = call_as(admin, "publication_request_list")
+    assert listed
+    for row in listed:
+        assert_decision_present(row)
+
+
+def test_the_row_tells_the_sole_admin_they_may_decide_their_own(sole_admin_scene, store):
+    """S4, the grant: the requester who is the only person of the organization
+    reads `True` on the row they just created, which is what makes the record
+    card keep the control instead of hiding it.
+
+    The same row answers `False` once it is decided, and that is not a detail:
+    the field describes a request that can still be decided, and the action
+    refuses a settled one with `409`, so a `True` there would be a lie.
+    """
+    admin = sole_admin_scene["admin"]
+    dataset = sole_admin_scene["dataset"]
+
+    created = request_for(admin, dataset["id"])
+    assert created["decidable_by_caller"] is True
+
+    decided = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+    assert decided["status"] == "approved"
+    assert decided["decidable_by_caller"] is False
+
+    listed = call_as(admin, "publication_request_list", status="approved")
+    target = [row for row in listed if row["id"] == created["id"]]
+    assert len(target) == 1, listed
+    assert target[0]["decidable_by_caller"] is False
+
+
+def test_the_row_tells_three_callers_apart_on_one_request(scene, store):
+    """S4, the three answers the queue renders from one row without owning a
+    rule: with a second admin in the organization the requester reads `False`
+    (four eyes still refuses them), the second admin reads `True` (they may
+    decide it) and an `editor` of the same organization reads `False` — the
+    exception lifts four eyes and never grants a capacity.
+
+    This is the case the record card exists for: the requester sees the request
+    and must not be offered the control.
+    """
+    second = factories.User()
+    add_user_member(scene["org"]["id"], second["id"], "admin")
+    created = request_for(scene["admin"], scene["dataset"]["id"])
+
+    assert created["decidable_by_caller"] is False
+
+    for caller, expected in ((second, True), (scene["editor"], False)):
+        seen = call_as(caller, "publication_request_list", status="pending")
+        target = [row for row in seen if row["id"] == created["id"]]
+        assert len(target) == 1, (caller["name"], seen)
+        assert target[0]["decidable_by_caller"] is expected
+
+
+def test_list_measures_the_other_approvers_in_one_query_for_the_whole_page(
+    scene, store
+):
+    """The cost shape of the field, in the half that batches: the
+    other-approver facts of every organization the page is about resolve in
+    **one** statement, the way the page's names and titles do. A per-row question
+    would measure one per row, and the queue is the one place where the number of
+    statements is part of this contract.
+
+    What this counter covers is the other-approver question **only**. The field
+    also rides the predicate's first gate, the requester's capacity, which is
+    memoized per `(requester, organization)` pair and is deliberately not pinned
+    here: matching that statement would pin CKAN's own hierarchy walk.
+    """
+    editor = scene["editor"]
+    admin = scene["admin"]
+    for dataset in (scene["dataset"], scene["second_dataset"], fresh_dataset(scene)):
+        request_for(editor, dataset["id"])
+
+    listed, statements = measured(lambda: call_as(admin, "publication_request_list"))
+
+    assert len(listed) >= 3
+
+    selects = other_approver_selects(statements)
+    assert len(selects) == 1, selects
 
 
