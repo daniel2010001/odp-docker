@@ -69,6 +69,50 @@ def add_user_member(org_id, user_id, capacity):
     )
 
 
+def membership_rows(org_id, sysadmin):
+    """The `active`, `admin` member rows of an organization, resolved to user
+    names and split by whether the user is a platform sysadmin.
+
+    Read from the **data**, never through the predicate under test: a premise
+    assertion that ran the rule it is asserting the premise of would agree with
+    a wrong implementation. `member.table_id` is the user id for a user
+    membership (`member_create` builds `table_id=obj.id`). The join starts from
+    the **user** row, so a member row whose user does not resolve is not in this
+    result: these helpers assert the premise of scenes whose memberships all
+    resolve, and the unresolvable membership has a test of its own, which builds
+    its row explicitly and goes through the predicate.
+    """
+    ckan_model.Session.expire_all()
+    rows = (
+        ckan_model.Session.query(ckan_model.User.name, ckan_model.User.sysadmin)
+        .outerjoin(ckan_model.Member, ckan_model.Member.table_id == ckan_model.User.id)
+        .filter(ckan_model.Member.group_id == org_id)
+        .filter(ckan_model.Member.table_name == "user")
+        .filter(ckan_model.Member.capacity == "admin")
+        .filter(ckan_model.Member.state == "active")
+        .all()
+    )
+    return {
+        name
+        for (name, is_sysadmin) in rows
+        if bool(is_sysadmin) == sysadmin
+    }
+
+
+def org_admins(org_id):
+    """The people the exception is about: an organization's `active` `admin`
+    members who are **not** platform sysadmins."""
+    return membership_rows(org_id, sysadmin=False)
+
+
+def sysadmin_members(org_id):
+    """The platform's administration as it appears **inside** an organization:
+    an `active` `admin` member who is a sysadmin. CKAN creates one for whoever
+    created the organization (`logic/action/create.py`, "creator of group/org
+    becomes an admin"), the sysadmin included."""
+    return membership_rows(org_id, sysadmin=True)
+
+
 @pytest.fixture
 def scene(clean_db):
     """One organization with an editor, a member and an admin, an outsider's
@@ -127,6 +171,29 @@ def suborg_scene(scene, clean_db):
         child_admin=child_admin,
         child_dataset=factories.Dataset(owner_org=child["id"], private=True),
     )
+
+
+@pytest.fixture
+def sole_admin_scene(clean_db):
+    """One organization whose only **person** is its admin, and a private
+    dataset in it: the shape four of the five live organizations have, and the
+    one the exception exists for.
+
+    The factory's own membership is part of the shape, not noise:
+    `factories.Organization()` goes through `organization_create`, which makes
+    the caller an `admin` member of the group it creates — under the test
+    fixtures the sysadmin `test.ckan.net`. It stays, and it is not a second
+    person: S1-bis leaves the platform's administration out of the count.
+    """
+    admin = factories.User()
+    org = factories.Organization()
+    add_user_member(org["id"], admin["id"], "admin")
+
+    return {
+        "org": org,
+        "admin": admin,
+        "dataset": factories.Dataset(owner_org=org["id"], private=True),
+    }
 
 
 def call_as(user, action, **data):
@@ -461,9 +528,20 @@ def test_the_child_orgs_own_admin_can_decide(suborg_scene, store):
     assert decided["status"] == "approved"
 
 
-def test_the_requester_cannot_decide_their_own_request(scene, store):
-    """Four eyes: an org admin who opened the request cannot approve it, and the
-    refusal is not a silent no-op — the row stays `pending`."""
+def test_the_requester_cannot_decide_their_own_request_when_another_admin_exists(
+    scene, store
+):
+    """Four eyes, now conditional (S1): an org admin who opened the request
+    cannot approve it **while another person of the organization could**, and
+    the refusal is not a silent no-op — the row stays `pending`.
+
+    The second admin is what puts this test on the refused branch. `scene` gives
+    its organization a single admin, which is exactly the shape the exception
+    unlocks; without a second person here the request would be approved and this
+    would be asserting the opposite of what its name says.
+    """
+    second = factories.User()
+    add_user_member(scene["org"]["id"], second["id"], "admin")
     created = request_for(scene["admin"], scene["dataset"]["id"])
 
     with pytest.raises(toolkit.NotAuthorized) as excinfo:
@@ -502,7 +580,14 @@ def test_a_sysadmin_can_decide_someone_elses_request(scene, store):
 def test_a_sysadmin_cannot_decide_their_own_request(scene, store):
     """Four eyes has no sysadmin exception: the requester is refused even as a
     sysadmin. There is no direct-publish escape hatch any more, so the request
-    simply stays pending until someone else decides it."""
+    simply stays pending until someone else decides it.
+
+    This is the **refused** side of S1, and it holds because `scene`'s
+    organization has another person who could decide it (`scene["admin"]`): the
+    exception refuses only where nobody else can, so the sysadmin's own request
+    stays with four eyes. Its pair is
+    `test_a_sysadmin_member_does_not_count_as_a_second_person`.
+    """
     sysadmin = factories.Sysadmin()
     created = request_for(sysadmin, scene["dataset"]["id"])
 
@@ -561,6 +646,186 @@ def test_a_non_approver_requester_gets_not_an_approver_not_four_eyes(scene, stor
     assert auth_publication.NOT_AN_APPROVER_LABEL + ": " in str(excinfo.value)
     assert auth_publication.FOUR_EYES_LABEL + ": " not in str(excinfo.value)
     assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+# ---------------------------------------------------------------------------
+# S1 — four eyes lifts where no other person of the organization can approve
+#
+# The exception decides **when** self-approval is permitted, never **who** may
+# decide: the predicate keeps accepting a related organization's admin when
+# someone asks that admin (`test_a_parent_org_admin_can_decide_a_child_org_request`
+# stays as it is). What changes is the count.
+# ---------------------------------------------------------------------------
+
+
+def test_the_sole_admin_of_an_org_can_decide_their_own_request(sole_admin_scene, store):
+    """S1, the branch the exception exists for: the requester is the only person
+    of the organization, so four eyes has no second pair of eyes to protect and
+    the request is decided by its own requester.
+
+    The trace is the data and not a new label (S3): the same id lands in
+    `requested_by` and in `approved_by`.
+    """
+    admin = sole_admin_scene["admin"]
+    dataset = sole_admin_scene["dataset"]
+
+    assert org_admins(sole_admin_scene["org"]["id"]) == {admin["name"]}
+
+    created = request_for(admin, dataset["id"])
+
+    decided = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+    assert decided["requested_by"] == admin["id"]
+    assert decided["approved_by"] == admin["id"]
+    assert stored(dataset["id"])["private"] is False
+
+
+def test_a_second_admin_of_the_org_keeps_four_eyes(scene, store):
+    """S1's other branch, and the one that keeps the rule alive: with a second
+    `admin` in the organization the requester is still refused, the row stays
+    `pending` and the dataset stays private.
+    """
+    second = factories.User()
+    add_user_member(scene["org"]["id"], second["id"], "admin")
+
+    assert org_admins(scene["org"]["id"]) == {scene["admin"]["name"], second["name"]}
+
+    created = request_for(scene["admin"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            scene["admin"],
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.FOUR_EYES_LABEL + ": " in str(excinfo.value)
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+def test_a_sysadmin_member_does_not_count_as_a_second_person(sole_admin_scene, store):
+    """S1-bis, and the reason the exception is usable on this instance at all:
+    CKAN makes the **creator** an `admin` member of the organization it creates
+    (`logic/action/create.py`, "creator of group/org becomes an admin"), so the
+    platform's sysadmin sits inside every organization. Counting it would mean
+    no organization's admin could ever approve their own request — four of the
+    five live organizations have that sysadmin as their only other member.
+
+    The premise is asserted from the member rows, so this fails loudly if a
+    future fixture stops creating that membership instead of passing for the
+    wrong reason.
+    """
+    admin = sole_admin_scene["admin"]
+    org_id = sole_admin_scene["org"]["id"]
+    dataset = sole_admin_scene["dataset"]
+    sysadmin = factories.Sysadmin()
+    add_user_member(org_id, sysadmin["id"], "admin")
+
+    assert sysadmin["name"] in sysadmin_members(org_id)
+    assert sysadmin["name"] not in org_admins(org_id)
+    assert org_admins(org_id) == {admin["name"]}
+
+    created = request_for(admin, dataset["id"])
+
+    decided = call_as(
+        admin,
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+    assert stored(dataset["id"])["private"] is False
+
+
+@pytest.mark.ckan_config("ckan.roles_that_cascade_to_sub_groups", "admin")
+def test_a_related_orgs_admin_does_not_count_as_a_second_person(suborg_scene, store):
+    """S2: the count looks at the **owning** organization's memberships, never
+    at effective permissions. The parent organization's admin is a real
+    approver for the child — the cascade is configured on here, and
+    `has_user_permission_for_group_or_org` answers True for them — so asking
+    that question would count the parent's admin as a second person and deny the
+    child's own admin forever.
+
+    Discriminating: with the permission-shaped question the exemption never
+    fires and this reads `Four eyes`. The fix is the membership question, not a
+    narrower rule.
+    """
+    child = suborg_scene["child"]
+    child_admin = suborg_scene["child_admin"]
+    child_dataset = suborg_scene["child_dataset"]
+
+    assert org_admins(child["id"]) == {child_admin["name"]}
+    assert org_admins(suborg_scene["org"]["id"]) == {suborg_scene["admin"]["name"]}
+
+    created = request_for(child_admin, child_dataset["id"])
+
+    decided = call_as(
+        child_admin,
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+    assert stored(child_dataset["id"])["private"] is False
+
+
+def test_the_exception_fails_closed_when_a_membership_cannot_be_resolved(
+    sole_admin_scene, store
+):
+    """S6: the rule concedes only when the **absence** of a second person is
+    established. A member row whose user no longer resolves is not an approver
+    anyone can rule out — `member.table_id` carries no foreign key, so the schema
+    admits one — and an unestablished count must not open a self-approval.
+
+    What this guards is the schema, not the API, and that is worth saying:
+    CKAN's own `user_delete` deletes the user's memberships in the same
+    transaction (`logic/action/delete.py`), so no action here can produce this
+    state. The rule's direction still has to hold for the states the data admits.
+
+    A guard rather than a discriminating test: before the exception existed
+    nothing was conceded here either, so this passes under the old code too. Its
+    value is that it pins the **direction** of the failure, and its pair is
+    `test_the_sole_admin_of_an_org_can_decide_their_own_request` — the same
+    scene with a membership set that resolves.
+    """
+    admin = sole_admin_scene["admin"]
+    dataset = sole_admin_scene["dataset"]
+    created = request_for(admin, dataset["id"])
+
+    # `member.group`, not only `group_id`: the relationship owns the column, so
+    # an FK set by hand while the relationship stays `None` is written as NULL.
+    # This is CKAN's own idiom (`member_create`: `member.group = group`).
+    unresolvable = ckan_model.Member(
+        table_name="user",
+        table_id="00000000-0000-0000-0000-000000000000",
+        capacity="admin",
+        state="active",
+    )
+    unresolvable.group = ckan_model.Group.get(sole_admin_scene["org"]["id"])
+    ckan_model.Session.add(unresolvable)
+    ckan_model.Session.commit()
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            admin,
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.FOUR_EYES_LABEL + ": " in str(excinfo.value)
+    assert the_row(dataset["id"]).status == "pending"
+    assert stored(dataset["id"])["private"] is True
 
 
 def test_list_returns_only_what_the_caller_may_see(scene, store):
