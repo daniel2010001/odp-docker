@@ -30,6 +30,8 @@ git clone https://github.com/daniel2010001/odp-docker.git .
 
 Antes del primer `up`, crear `.env` en la **raíz** de este repo a partir de `.env.example` y completar `SESSION_SECRET` (la clave que sella la cookie de sesión del portal; por ejemplo `openssl rand -base64 32`). Sin ella Compose se niega a arrancar. Va en el `.env` raíz y **no** en `ckan-docker/.env`: Compose interpola el compose raíz desde el `.env` de su propia carpeta, y el de `ckan-docker/` sólo alimenta el stack CKAN incluido. Rotarla invalida todas las sesiones abiertas.
 
+Ojo con los nombres: una variable del `.env` raíz **también pisa** a la del mismo nombre en `ckan-docker/.env` (medido con docker compose 5.6.0), así que el `.env` raíz no debe repetir nombres de ese archivo.
+
 ```sh
 cp .env.example .env    # y completar SESSION_SECRET
 docker compose -f docker-compose.unified.yml up --build -d
