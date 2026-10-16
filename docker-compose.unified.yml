@@ -52,6 +52,12 @@ services:
       # Compose se niega a arrancar. Se lee del `.env` de la RAÍZ de este repo (ver
       # `.env.example`), no de `ckan-docker/.env`.
       SESSION_SECRET: ${SESSION_SECRET:?falta SESSION_SECRET en .env de la raiz (ver .env.example)}
+      # Techo del cuerpo de adapter-node para /catalog/ (subidas de recursos). Su
+      # default es 512 KB y, pasado, responde 400 (no 413). Igual al
+      # client_max_body_size de /api/ y /catalog/ en frontend-proxy/nginx.conf:
+      # 50 MB por recurso (PRD RF-12) más overhead del multipart, por debajo de los
+      # 100 MB efectivos de CKAN. `tests/test-upload-body-limit.sh` exige que coincidan.
+      BODY_SIZE_LIMIT: 55M
     # Se conecta a la red donde nginx/ckan son alcanzables para que el proxy
     # pueda llegar a él en :3000.
     networks:
