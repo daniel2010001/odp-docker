@@ -33,12 +33,13 @@ jobs:
           exit "$status"
 
       - name: Run the host tests
-        # Every `ckan-docker/*/tests/*.sh` is self-contained: it stubs the commands
-        # it needs, so it runs here in milliseconds without Docker. The glob means a
-        # new test file is picked up without editing this workflow.
+        # Every `ckan-docker/*/tests/*.sh` and `tests/*.sh` is self-contained: it
+        # stubs the commands it needs, so it runs here in milliseconds without
+        # Docker. `tests/` holds the guards whose subject is the root compose. The
+        # globs mean a new test file is picked up without editing this workflow.
         run: |
           status=0
-          for t in ckan-docker/*/tests/*.sh; do
+          for t in ckan-docker/*/tests/*.sh tests/*.sh; do
             [ -e "$t" ] || continue
             echo "== $t"
             bash "$t" || status=1
