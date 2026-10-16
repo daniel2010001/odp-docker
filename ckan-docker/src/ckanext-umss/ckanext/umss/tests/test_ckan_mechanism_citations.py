@@ -163,6 +163,18 @@ CITATIONS = [
         docstring="ckanext/umss/logic/auth/publication.py module docstring",
     ),
     Citation(
+        claim="the public label needs an active, non-private dataset",
+        path="ckan/lib/plugins.py",
+        fragment="if dataset_obj.state == u'active' and not dataset_obj.private:",
+        docstring="ckanext/umss/logic/action/publication.py, _flip_to_public docstring",
+    ),
+    Citation(
+        claim="ignore_not_package_admin steps aside when the context carries ignore_auth",
+        path="ckan/logic/validators.py",
+        fragment="if 'ignore_auth' in context:",
+        docstring="ckanext/umss/logic/action/publication.py, _flip_to_public docstring",
+    ),
+    Citation(
         claim="authz short-circuits a sysadmin unless auth_sysadmins_check is set",
         path="ckan/authz.py",
         fragment="if not getattr(auth_function, 'auth_sysadmins_check', False):",

@@ -13,7 +13,9 @@ caller directly because it does not call `next_auth`. Core itself refuses
 `member`, a cross-organization `editor` and anonymous callers before the wall
 runs. So no raw core call is a second, unrecorded door: the flow's own flip is
 the one write that bypasses the wall (`ignore_auth`), and it is the sanctioned
-door.
+door. That door **completes the publication**: CKAN grants the `public` label to
+a dataset that is active and not private, so a `draft` dataset whose visibility
+is flipped would be published and invisible at once. See `_flip_to_public`.
 
 They write the record and flip the value in one commit (D5) because
 `package_patch` commits the session it is handed. Measured against the CKAN
@@ -264,10 +266,32 @@ def _flip_to_public(context, dataset_id):
     point — and `ignore_auth`, because the caller's capacity was already settled
     by this action's own auth function. Without `ignore_auth` the wall would
     refuse the very flip it exists to be the only way through.
+
+    **It completes the publication, not only the visibility.** CKAN grants the
+    `public` label to a dataset that is active and not private
+    (`ckan/lib/plugins.py`,
+    `if dataset_obj.state == u'active' and not dataset_obj.private:`), and an
+    anonymous reader holds only that label. A dataset in `state='draft'` would
+    therefore be published — `private = false` — and invisible to every anonymous
+    caller: a dataset the flow reports as published and the catalog refuses to
+    show. So a `draft` is completed here too, and **only** a `draft`: a `deleted`
+    dataset is never revived by a publication, which is why the patch is built
+    from the dataset's current state instead of writing the state
+    unconditionally.
+
+    Two CKAN facts make that patch possible, both read in the source the suite
+    runs. `state` is part of the update schema (`ignore_not_package_admin`,
+    `ignore_missing`), and that validator steps aside exactly when the context
+    carries the flag this flip already sets (`ckan/logic/validators.py`,
+    `if 'ignore_auth' in context:`). Without that flag the wall would drop the
+    state and this function would silently complete half the publication again.
     """
+    patch = {"id": dataset_id, "private": False}
+    dataset = model.Package.get(dataset_id)
+    if dataset is not None and dataset.state == "draft":
+        patch["state"] = "active"
     toolkit.get_action("package_patch")(
-        {"ignore_auth": True, "user": context.get("user")},
-        {"id": dataset_id, "private": False},
+        {"ignore_auth": True, "user": context.get("user")}, patch
     )
 
 
