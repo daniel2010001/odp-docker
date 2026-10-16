@@ -77,7 +77,12 @@ done
 # obligatorio: un nombre suelto se resuelve contra `<solr.home>/configsets`, que
 # no tiene el esquema de CKAN. Idempotente.
 CORE="${SOLR##*/}"
-python - "$SOLR" "$CORE" <<PY
+# El delimitador va entre comillas (dobles: este payload no admite simples) para
+# que bash entregue el Python tal cual. Sin comillas, bash ejecutaba como comando
+# lo que el comentario de abajo cita entre comillas invertidas: cada log empezaba
+# con "Try timeout --help". Python recibe sus datos por argv, no por expansión.
+# Lo vigila `tests/test-heredoc-quoting.sh`.
+python - "$SOLR" "$CORE" <<"PY"
 import json, sys, urllib.request, urllib.error
 
 solr, core = sys.argv[1], sys.argv[2]
