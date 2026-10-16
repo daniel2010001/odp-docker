@@ -47,6 +47,11 @@ services:
       # URL interna de CKAN para el proxy server-side de /auth/login.
       # Dentro de la red ckannet, ckan:5000 es la instancia de producción.
       CKAN_INTERNAL_URL: http://ckan:5000
+      # Clave que sella la cookie de sesión del portal (AES-256-GCM). Obligatoria y
+      # sin valor por defecto: con uno, cualquiera podría fabricar sesiones. Sin ella
+      # Compose se niega a arrancar. Se lee del `.env` de la RAÍZ de este repo (ver
+      # `.env.example`), no de `ckan-docker/.env`.
+      SESSION_SECRET: ${SESSION_SECRET:?falta SESSION_SECRET en .env de la raiz (ver .env.example)}
     # Se conecta a la red donde nginx/ckan son alcanzables para que el proxy
     # pueda llegar a él en :3000.
     networks:

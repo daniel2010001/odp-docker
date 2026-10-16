@@ -28,7 +28,10 @@ git clone https://github.com/daniel2010001/odp-docker.git .
 
 ## Uso
 
+Antes del primer `up`, crear `.env` en la **raíz** de este repo a partir de `.env.example` y completar `SESSION_SECRET` (la clave que sella la cookie de sesión del portal; por ejemplo `openssl rand -base64 32`). Sin ella Compose se niega a arrancar. Va en el `.env` raíz y **no** en `ckan-docker/.env`: Compose interpola el compose raíz desde el `.env` de su propia carpeta, y el de `ckan-docker/` sólo alimenta el stack CKAN incluido. Rotarla invalida todas las sesiones abiertas.
+
 ```sh
+cp .env.example .env    # y completar SESSION_SECRET
 docker compose -f docker-compose.unified.yml up --build -d
 ```
 
@@ -53,7 +56,7 @@ nginx reverse proxy same-origin: el frontend se build-ea con `PUBLIC_CKAN_URL` v
 
 | job | qué verifica | coste |
 |---|---|---|
-| `shell-tests` | que los `docker-entrypoint.d/*.sh` parseen, y que pasen todos los `ckan-docker/*/tests/*.sh` | segundos, sin Docker |
+| `shell-tests` | que los `docker-entrypoint.d/*.sh` parseen, y que pasen todos los `ckan-docker/*/tests/*.sh` y `tests/*.sh` | segundos, sin Docker |
 | `umss-tests` | la suite de `ckanext-umss` en `ckan/ckan-dev:2.12` con solr, postgres y redis | minutos |
 
 Los workflows que viven dentro de `ckan-docker/.github/` y de `ckan-docker/src/ckanext-umss/.github/` pertenecen a sus repos upstream: GitHub **no** los ejecuta aquí, porque sólo lee `.github/workflows/` en la raíz del repo.
@@ -62,5 +65,5 @@ El job liviano son, literalmente, estos dos loops; localmente no hace falta Dock
 
 ```sh
 for f in ckan-docker/*/docker-entrypoint.d/*.sh; do bash -n "$f"; done
-for t in ckan-docker/*/tests/*.sh; do bash "$t"; done
+for t in ckan-docker/*/tests/*.sh tests/*.sh; do bash "$t"; done
 ```
