@@ -2144,3 +2144,76 @@ def test_list_measures_the_other_approvers_in_one_query_for_the_whole_page(
     assert len(selects) == 1, selects
 
 
+# ---------------------------------------------------------------------------
+# The flip completes the publication: CKAN's `public` label needs both halves
+#
+# A dataset is publicly readable when `state == 'active'` **and** `not private`
+# (`ckan/lib/plugins.py`, `DefaultPermissionLabels.get_dataset_labels`), and an
+# anonymous reader holds only the `public` label. A dataset in `draft` is
+# therefore published — `private = false` — and invisible: the flow used to
+# complete one half of the rule and report the dataset as published.
+# ---------------------------------------------------------------------------
+
+
+def draft_dataset(scene):
+    """A private dataset in `state='draft'`, which is the shape CKAN calls an
+    unfinished dataset."""
+    return factories.Dataset(owner_org=scene["org"]["id"], private=True, state="draft")
+
+
+def package_state(dataset_id):
+    """`(state, private)` as the database holds them."""
+    ckan_model.Session.expire_all()
+    package = ckan_model.Session.get(ckan_model.Package, dataset_id)
+    return (package.state, package.private)
+
+
+def test_a_draft_dataset_becomes_readable_when_its_request_is_approved(scene, store):
+    """The rule: an approved publication has to leave the dataset **readable by
+    an anonymous caller**, and CKAN grants the `public` label only to a dataset
+    that is `active` and **not** private. Completing a `draft` is therefore part
+    of publishing it.
+
+    The test asks the consumer's own question — an anonymous `package_show` —
+    rather than trusting the column, because that is where the defect hides:
+    `private = false` on a `draft` reads like a published dataset and is refused
+    to every anonymous reader. Its control is the sibling test, where the same
+    anonymous call succeeds on an `active` dataset: without that pair, a refusal
+    here could be the anonymous access rule rather than the label.
+    """
+    draft = draft_dataset(scene)
+
+    assert package_state(draft["id"]) == ("draft", True)
+    refused(None, "package_show", id=draft["id"])
+
+    created = request_for(scene["editor"], draft["id"])
+    call_as(
+        scene["admin"],
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert the_row(draft["id"]).status == "approved"
+    assert package_state(draft["id"]) == ("active", False)
+    assert call_as(None, "package_show", id=draft["id"])["state"] == "active"
+
+
+def test_an_active_dataset_is_published_exactly_as_before(scene, store):
+    """The behaviour that already worked has to keep working: an `active` private
+    dataset goes through the same flip, stays `active`, and becomes readable by
+    an anonymous caller. This is the guard for the narrow rule — only a `draft`
+    is completed — and it fails if the state handling ever touches the ordinary
+    path."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+    call_as(
+        scene["admin"],
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert package_state(scene["dataset"]["id"]) == ("active", False)
+    assert call_as(None, "package_show", id=scene["dataset"]["id"])["private"] is False
+
+
