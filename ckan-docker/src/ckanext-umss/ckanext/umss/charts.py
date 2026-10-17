@@ -193,7 +193,14 @@ def validate_config(config):
 
     schema = view_config_schema()
     declared = {name for name in schema if not name.startswith("__")}
-    undeclared = sorted(set(config) - declared)
+    # Sorted by `str` on purpose: a config mapping can carry a key that is not a
+    # string at all (`{2: 3}`), and sorting those against strings is a
+    # `TypeError` — a 500 for a request that is merely wrong (O3 finding 3). The
+    # order is stable, which is what the messages want; the key never reaches
+    # the schema, so its type does not matter.
+    undeclared = sorted(
+        (name for name in config if name not in declared), key=str
+    )
     if undeclared:
         raise toolkit.ValidationError({
             "config": [

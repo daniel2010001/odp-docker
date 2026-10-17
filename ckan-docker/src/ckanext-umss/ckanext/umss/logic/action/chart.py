@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import logging
+import math
 
 import ckan.model as model
 import ckan.plugins.toolkit as toolkit
@@ -55,6 +57,8 @@ from ckanext.datastore.backend.postgres import get_read_engine
 
 from ckanext.umss import charts
 
+
+log = logging.getLogger(__name__)
 
 __all__ = ["umss_chart_data"]
 
@@ -415,9 +419,28 @@ def _parameters(config):
 
 
 def _timeout_ms():
-    return toolkit.asint(
-        toolkit.config.get(TIMEOUT_SETTING, DEFAULT_TIMEOUT_MS)
+    """The cap on the query, in milliseconds, and never off.
+
+    The contract's cap cannot be disabled from configuration (O3 finding 1):
+    `statement_timeout = 0` means "no limit" to Postgres, a negative value is a
+    server error (`InvalidParameterValue`, SQLSTATE 22023) and a non-numeric one
+    is a `ValueError` here — a 500 for what is a bad setting. So the setting is
+    read as "an integer >= 1, or the default", and a value that cannot be a cap
+    falls back to the default and says so once per request.
+    """
+    configured = toolkit.config.get(TIMEOUT_SETTING, DEFAULT_TIMEOUT_MS)
+    try:
+        timeout_ms = int(str(configured).strip())
+    except (TypeError, ValueError):
+        timeout_ms = 0
+    if timeout_ms >= 1:
+        return timeout_ms
+
+    log.warning(
+        "%s is %r, which is not an integer >= 1: the query cap stays at %d ms",
+        TIMEOUT_SETTING, configured, DEFAULT_TIMEOUT_MS,
     )
+    return DEFAULT_TIMEOUT_MS
 
 
 def _read(resource_id, statement, parameters):
@@ -475,16 +498,23 @@ def _read(resource_id, statement, parameters):
 
 def _json_value(value):
     """A number as JSON can carry it: an `int` when it is integral, a `float`
-    when it is not, and nothing else changed.
+    when it is not, and a non-finite number as `null` (O3 finding 2).
 
     `sum`/`avg`/`min`/`max` over a `numeric` come back as `Decimal`, which no
     JSON encoder knows; `count` and the integer columns come back as `int`
-    already and are left alone.
+    already and are left alone. `NaN` and `+/-Infinity` are numbers JSON has no
+    spelling for — `Decimal('Infinity')` used to raise `OverflowError` in
+    `int(...)`, and a `float8` column carries both — so they become `null`,
+    which is the only "no value" JSON has.
     """
     if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return None
         if value == value.to_integral_value():
             return int(value)
         return float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return value
 
 

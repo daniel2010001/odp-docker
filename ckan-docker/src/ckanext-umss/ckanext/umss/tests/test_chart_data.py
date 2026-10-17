@@ -25,6 +25,9 @@ Two notes on the fixtures, because both are easy to get wrong:
   it (the SQL is what is under test there), and every authorization test uses
   `call_as`, which passes only the caller.
 """
+import logging
+import math
+
 import pytest
 from psycopg2 import sql
 
@@ -34,6 +37,7 @@ from ckan.tests import factories, helpers
 
 import ckanext.datastore.tests.helpers as test_helpers
 from ckanext.datastore.backend.postgres import get_write_engine
+from ckanext.umss.logic.action import chart
 
 
 pytestmark = [
@@ -1106,8 +1110,6 @@ def test_the_query_runs_on_the_datastore_read_engine(scene, monkeypatch):
     `ckanext.datastore.backend.postgres.get_read_engine`. That the role itself
     cannot write is the database's grant, not this test's.
     """
-    from ckanext.umss.logic.action import chart
-
     resource_id = make_table(scene)
     engines = []
     real = chart.get_read_engine
@@ -1122,3 +1124,187 @@ def test_the_query_runs_on_the_datastore_read_engine(scene, monkeypatch):
     ask(resource_id)
 
     assert len(engines) == 1
+
+
+# ---------------------------------------------------------------------------
+# The O3 findings: the cap, non-finite numbers, and a config that is not keys
+# ---------------------------------------------------------------------------
+
+TIMEOUT_LOGGER = "ckanext.umss.logic.action.chart"
+
+
+def timeout_warnings(caplog):
+    return [
+        record for record in caplog.records
+        if record.name == TIMEOUT_LOGGER and "timeout_ms" in record.getMessage()
+    ]
+
+
+@pytest.mark.parametrize("setting", ["0", "-1", "abc"],
+                         ids=["zero", "negative", "not-a-number"])
+def test_an_unusable_timeout_setting_falls_back_to_the_default(
+        scene, ckan_config, caplog, setting):
+    """O3 finding 1: config cannot disable the contract's cap.
+
+    `statement_timeout = 0` is "no limit" to Postgres, and a negative value is
+    a server error (SQLSTATE 22023) while a non-numeric one is a `ValueError`
+    here — a 500 either way. So the setting is read as "an integer >= 1 or the
+    default", and the fallback says so once per request.
+
+    What is asserted is the effective timeout (`_timeout_ms`), because the
+    disabled-cap case is not observable end to end: proving that a 5 s cap is in
+    force needs a query slower than 5 s, which needs a table the suite cannot
+    build. That a cap *is* applied end to end has its own test, at 1 ms.
+    """
+    resource_id = make_table(scene)
+    ckan_config["ckanext.umss.chart.timeout_ms"] = setting
+
+    with caplog.at_level(logging.WARNING, logger=TIMEOUT_LOGGER):
+        already = len(timeout_warnings(caplog))
+        answer = ask(resource_id)
+
+    assert answer["total_rows"] == 5
+    assert groups(answer) == [("a", 1), ("b", 2), ("c", 1), (None, 1)]
+    # One request, one warning — counted around the request so the probe below
+    # does not add its own.
+    assert len(timeout_warnings(caplog)) - already == 1
+    assert chart._timeout_ms() == chart.DEFAULT_TIMEOUT_MS
+
+
+def test_a_usable_timeout_setting_is_used_as_given(scene, ckan_config, caplog):
+    """The fallback is for values that cannot be a cap, not for every value."""
+    resource_id = make_table(scene)
+    ckan_config["ckanext.umss.chart.timeout_ms"] = "1234"
+
+    with caplog.at_level(logging.WARNING, logger=TIMEOUT_LOGGER):
+        answer = ask(resource_id)
+
+    assert answer["total_rows"] == 5
+    assert chart._timeout_ms() == 1234
+    assert timeout_warnings(caplog) == []
+
+
+def test_a_non_finite_number_comes_back_as_null(scene):
+    """O3 finding 2: NaN and +/-Infinity are not JSON.
+
+    A `float8` column can hold them (a CSV import is where they come from), and
+    Postgres's own answers over such a group are non-finite: `sum` and `avg`
+    answer `NaN`, `min` answers `-Infinity` and `max` answers `NaN` (Postgres
+    sorts `NaN` above every number). A `Decimal` `Infinity` also used to raise
+    `OverflowError` in `int(...)`. All of them become JSON `null` here.
+
+    One consequence worth naming: a `null` key is no longer unique. Three
+    non-finite values and one SQL NULL all render `null`, so the answer carries
+    four null keys — which is the price of JSON having one null.
+    """
+    resource_id = make_table(
+        scene,
+        fields=[{"id": "g", "type": "int4"}, {"id": "v", "type": "float8"}],
+        records=[
+            {"g": 1, "v": 1.0},
+            {"g": 1, "v": "NaN"},
+            {"g": 1, "v": "Infinity"},
+            {"g": 1, "v": "-Infinity"},
+            {"g": 1, "v": None},
+        ],
+    )
+
+    for aggregate in ("sum", "avg", "min", "max"):
+        assert groups(ask(resource_id, x_field="g", y_agg=aggregate,
+                          y_field="v")) == [(1, None)], aggregate
+
+    # The two aggregates that stay finite: blanks and NULLs are not values, but
+    # the four distinct non-null ones are (NaN counts once).
+    assert groups(ask(resource_id, x_field="g", y_agg="count_distinct",
+                      y_field="v")) == [(1, 4)]
+    assert groups(ask(resource_id, x_field="g")) == [(1, 5)]
+
+    # The key side: a `value` bucket on the same column, and a `number_step`
+    # bucket, which floor()s the non-finite values into non-finite keys.
+    for overrides in ({"x_bucket": "value"},
+                      {"x_bucket": "number_step", "x_step": 2}):
+        answer = ask(resource_id, x_field="v", **overrides)
+        for key, _value in groups(answer):
+            assert key is None or (
+                isinstance(key, float) and math.isfinite(key)
+            ), (overrides, key)
+
+    answer = ask(resource_id, x_field="v")
+    assert [key for key, _ in groups(answer)].count(None) == 4
+
+
+def test_a_config_key_that_is_not_a_string_is_refused_under_config(scene):
+    """O3 finding 3: a config mapping with a non-string key is a bad request,
+    not a crash.
+
+    It used to raise `TypeError` out of the undeclared-key check (`sorted` over
+    a mix of `int` and `str`, and the key itself reaching a `%s`-free path),
+    which is a 500. It is refused under `config` like any other unexpected key —
+    L18 fixes the set of keys an error may land on, and a key the caller
+    invented cannot be one of them.
+    """
+    resource = a_resource(scene)
+
+    with pytest.raises(toolkit.ValidationError) as caught:
+        helpers.call_action("umss_chart_data", resource_id=resource["id"],
+                            config={**config(), 2: 3})
+
+    assert caught.value.error_dict["config"] == ["Unexpected key: 2"]
+
+    with pytest.raises(toolkit.ValidationError) as caught:
+        helpers.call_action("umss_chart_data", resource_id=resource["id"],
+                            config={**config(), 2: 3, "colour": "red"})
+
+    assert assert_allowed(caught.value.error_dict)["config"] == [
+        "Unexpected key: 2",
+        "Unexpected key: colour",
+    ]
+
+
+def test_version_has_to_be_the_contract_version(scene):
+    resource = a_resource(scene)
+
+    assert "version" in refusal(resource["id"], version=2)
+
+
+@pytest.mark.parametrize("step", [-5, "abc", "1e400"],
+                         ids=["negative", "not-a-number", "huge"])
+def test_a_step_that_is_not_a_number_greater_than_zero_is_keyed_on_x_step(
+        scene, step):
+    """`1e400` matters twice over: as a `Decimal` it is finite, and only the
+    `float()` check in the validator refuses it — and a step that reaches
+    Postgres as `inf` would be a 500 instead of a `ValidationError`."""
+    resource = a_resource(scene)
+
+    assert "x_step" in refusal(resource["id"], x_field="turno",
+                               x_bucket="number_step", x_step=step)
+
+
+def test_a_stale_saved_config_is_refused_on_the_missing_column(scene):
+    """The visitor form re-asks the DataStore, so a column dropped after the
+    view was saved is refused by name — not a 500, and not a silent empty
+    chart."""
+    resource_id = make_table(scene)
+    view = saved_view(resource_id, x_field="letra")
+    execute_on_write_engine(
+        sql.SQL("ALTER TABLE {table} DROP COLUMN {column}").format(
+            table=sql.Identifier(resource_id),
+            column=sql.Identifier("letra"),
+        )
+    )
+
+    with pytest.raises(toolkit.ValidationError) as caught:
+        call_as(None, "umss_chart_data", view_id=view["id"])
+
+    assert "x_field" in assert_allowed(caught.value.error_dict)
+
+
+def test_a_visitor_view_on_a_resource_without_a_table_is_not_found(scene):
+    """A view can be saved on a resource that has no DataStore table (the save
+    path must not query the DataStore). Reading it is `ObjectNotFound`, the
+    same answer `datastore_search` gives."""
+    resource = a_resource(scene)
+    view = saved_view(resource["id"])
+
+    with pytest.raises(toolkit.ObjectNotFound):
+        call_as(None, "umss_chart_data", view_id=view["id"])
