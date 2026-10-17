@@ -137,6 +137,30 @@ from the root of this directory (`ckan-docker/` in the outer repository):
 `test-umss` derives the test database, datastore and Solr core from the container's own
 values, exports them, and then runs `pytest --ckan-ini=test.ini`.
 
+A fresh stack creates `datastore_test` bare: `postgresql/docker-entrypoint-initdb.d/30_setup_test_databases.sh`
+only runs `CREATE DATABASE`. So before pytest starts, the runner probes `datastore_test` for the two
+objects CKAN's `datastore set-permissions` creates and the suite depends on —
+`populate_full_text_trigger` and `_table_metadata` — and, only when one is missing, applies the SQL
+CKAN itself generates (`ckanext.datastore.cli.permissions_sql`) in a single transaction, as the
+role in the datastore write URL. It prints one line saying so; a later run sees both objects and
+prints nothing. Without that step every `datastore_create` in the suite dies with
+`function populate_full_text_trigger() does not exist`, and `datastore_info` with
+`relation "_table_metadata" does not exist`.
+
+Which database receives that schema is decided by the server, not by the URL: the runner's very
+first statement is `select current_database()`, and it refuses — having executed nothing else —
+unless the answer is the database the write URL names, ends in `_test`, and is the one every
+`\connect` in the generated script points at. Only then are those meta-commands stripped and the
+rest applied, in one transaction, as the role in the write URL. The path check on the derived URL
+stays as the first line of defence, but it is not the answer: measured on this stack, psycopg2
+opens `.../datastore_test?dbname=datastore` as `datastore`, and `target_guard.py` documents the
+same effect for `?database=` through SQLAlchemy.
+
+The generated script is CKAN's `set-permissions`, and it reaches beyond `datastore_test`: it also
+revokes `CONNECT` on the main test database (`ckan_test`) from the datastore read-only role and
+grants it back on `datastore_test`. That is an ACL change only — no data, no schema, no third
+database, and both targets are test databases — and it is what CKAN's own script does.
+
 Do not run `pytest --ckan-ini=test.ini` directly inside `ckan-dev`. `test.ini` cannot win:
 `update_config()` (`ckan/config/environment.py`, `CONFIG_FROM_ENV_VARS`) applies the
 container's `CKAN_SQLALCHEMY_URL`, `CKAN_SOLR_URL` and `CKAN_SITE_ID` *after* the ini, so a
