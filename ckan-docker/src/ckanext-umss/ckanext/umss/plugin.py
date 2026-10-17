@@ -6,6 +6,7 @@ import ckan.plugins.toolkit as toolkit
 import sqlalchemy as sa
 
 from ckanext.umss import auth
+from ckanext.umss import charts
 from ckanext.umss import model as umss_model
 from ckanext.umss.logic.action import publication as publication_actions
 from ckanext.umss.logic.auth import publication as publication_auth
@@ -16,6 +17,7 @@ class UmssPlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.IAuthFunctions)
     plugins.implements(plugins.IActions)
     plugins.implements(plugins.IPackageController, inherit=True)
+    plugins.implements(plugins.IResourceView, inherit=True)
 
     # IConfigurer
 
@@ -23,6 +25,30 @@ class UmssPlugin(plugins.SingletonPlugin):
         toolkit.add_template_directory(config_, "templates")
         toolkit.add_public_directory(config_, "public")
         toolkit.add_resource("assets", "umss")
+
+    # IResourceView
+
+    def info(self):
+        """`umss_chart`, a chart the publisher saves and the visitor only
+        reads. It is implemented by this plugin rather than a separate one so
+        `ckan.plugins` does not change. `resource_view_create` finds the view
+        by this `name` (`ckan/lib/datapreview.py:65-74`) and validates the
+        call against this `schema`.
+        """
+        return {
+            "name": charts.VIEW_TYPE,
+            "title": toolkit._("Chart"),
+            "icon": "chart-bar",
+            "iframed": False,
+            "requires_datastore": True,
+            "schema": charts.view_config_schema(),
+        }
+
+    def can_view(self, data_dict):
+        return bool(data_dict["resource"].get("datastore_active"))
+
+    def view_template(self, context, data_dict):
+        return "umss/chart_view.html"
 
     # IActions
 
