@@ -1193,9 +1193,7 @@ def test_a_non_finite_number_comes_back_as_null(scene):
     sorts `NaN` above every number). A `Decimal` `Infinity` also used to raise
     `OverflowError` in `int(...)`. All of them become JSON `null` here.
 
-    One consequence worth naming: a `null` key is no longer unique. Three
-    non-finite values and one SQL NULL all render `null`, so the answer carries
-    four null keys — which is the price of JSON having one null.
+    The key side is a separate rule (L23) and has its own test below.
     """
     resource_id = make_table(
         scene,
@@ -1219,18 +1217,33 @@ def test_a_non_finite_number_comes_back_as_null(scene):
                       y_field="v")) == [(1, 4)]
     assert groups(ask(resource_id, x_field="g")) == [(1, 5)]
 
-    # The key side: a `value` bucket on the same column, and a `number_step`
-    # bucket, which floor()s the non-finite values into non-finite keys.
-    for overrides in ({"x_bucket": "value"},
-                      {"x_bucket": "number_step", "x_step": 2}):
-        answer = ask(resource_id, x_field="v", **overrides)
-        for key, _value in groups(answer):
-            assert key is None or (
-                isinstance(key, float) and math.isfinite(key)
-            ), (overrides, key)
 
-    answer = ask(resource_id, x_field="v")
-    assert [key for key, _ in groups(answer)].count(None) == 4
+@pytest.mark.parametrize("column_type", ["float8", "numeric"])
+def test_a_non_finite_x_is_no_data_and_joins_the_one_null_group(scene, column_type):
+    """L23: NaN, Infinity and -Infinity in X are "no data", like a blank text.
+
+    They fall into the single null group, last, and `include_null: false`
+    drops them. Without the rule each one was a group of its own whose key
+    rendered `null`, and the -Infinity one came first.
+    """
+    resource_id = make_table(
+        scene,
+        fields=[{"id": "v", "type": column_type}],
+        records=[
+            {"v": 1.0},
+            {"v": "NaN"},
+            {"v": "Infinity"},
+            {"v": "-Infinity"},
+            {"v": None},
+        ],
+    )
+
+    assert groups(ask(resource_id, x_field="v")) == [(1, 1), (None, 4)]
+    assert groups(ask(resource_id, x_field="v", include_null=False)) == [(1, 1)]
+    assert groups(ask(resource_id, x_field="v", x_bucket="number_step",
+                      x_step=2)) == [(0, 1), (None, 4)]
+    assert groups(ask(resource_id, x_field="v", x_bucket="number_step",
+                      x_step=2, include_null=False)) == [(0, 1)]
 
 
 def test_a_config_key_that_is_not_a_string_is_refused_under_config(scene):

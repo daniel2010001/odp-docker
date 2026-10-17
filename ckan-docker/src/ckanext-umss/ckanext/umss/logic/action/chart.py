@@ -82,6 +82,10 @@ NUMERIC_TYPES = frozenset(
 )
 TIMESTAMP_TYPES = frozenset(("timestamp", "timestamptz", "date"))
 TEXT_TYPES = frozenset(("text", "varchar"))
+#: The numeric types that can hold a non-finite value. An integer cannot, and
+#: comparing one with `'NaN'` is an error, so they are left alone.
+NON_FINITE_TYPES = frozenset(("numeric", "float4", "float8"))
+NON_FINITE = ("NaN", "Infinity", "-Infinity")
 
 #: Buckets truncating a timestamp, and the unit `date_trunc` takes for each.
 DATE_UNITS = {"year": "year", "quarter": "quarter", "month": "month"}
@@ -316,6 +320,21 @@ empty string is a `Literal`, so nothing in the SQL text is hand-quoted.
     )
 
 
+def _no_non_finite(value):
+    """A non-finite number, read as no data (L23).
+
+    `NaN`, `Infinity` and `-Infinity` would otherwise be groups of their own
+    whose keys render `null`, and `-Infinity` would sort first. As no data they
+    join the one null group, last, under the same rule as a blank text. `CASE`
+    is syntax, not a function. Postgres compares `NaN` equal to itself, so `IN`
+    finds it.
+    """
+    return sql.SQL("CASE WHEN {value} IN ({non_finite}) THEN NULL ELSE {value} END").format(
+        value=value,
+        non_finite=sql.SQL(", ").join(sql.Literal(v) for v in NON_FINITE),
+    )
+
+
 def _x_values(config, x_type):
     """The X column as a value, with a text column's blanks read as no data.
 
@@ -327,6 +346,8 @@ def _x_values(config, x_type):
     column = sql.Identifier(config["x_field"])
     if x_type in TEXT_TYPES:
         return _no_blank(column)
+    if x_type in NON_FINITE_TYPES:
+        return _no_non_finite(column)
     return column
 
 
