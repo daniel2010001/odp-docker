@@ -9,6 +9,14 @@ every key that is not a `resource_view` column in `config`
 (`ckan/lib/dictization/model_save.py:650-662`) and merges `config` back into
 the top level of the dictized view (`ckan/lib/dictization/model_dictize.py:684-685`),
 so the keys are read beside `title`, not under a `config` key.
+
+They also pin the **cross-key** shape rules (`x_step` against `x_bucket`,
+`y_field` against `y_agg`, and no `_`-prefixed column on either axis) at save
+time. Those run as the schema's `__after` hook, so the save path and the
+`umss_chart_data` editor path share one definition of a valid configuration.
+The DataStore rules — does the column exist, is its type the one the bucket
+needs — are **not** here: saving a view must not query the DataStore, and
+`test_chart_data.py` owns them.
 """
 
 import pytest
@@ -112,3 +120,87 @@ def test_an_undeclared_key_is_refused_not_dropped():
 
     assert "__extras" in caught.value.error_dict
     assert helpers.call_action("resource_view_list", id=resource["id"]) == []
+
+
+# ---------------------------------------------------------------------------
+# The cross-key shape rules, enforced on save by the schema's `__after` hook
+#
+# The per-key rules of the contract's table cannot express these: whether
+# `x_step` is required depends on `x_bucket`, and whether `y_field` is required
+# depends on `y_agg`. They run at save time so a stored view can never carry a
+# configuration `umss_chart_data` would refuse, and the key the error lands on
+# is the culprit, never the pair.
+# ---------------------------------------------------------------------------
+
+
+def _refusal(**config):
+    """The error dict of a view the shape rules refuse, and the proof that
+    nothing was saved: a half-validated view must not exist."""
+    resource = factories.Resource()
+
+    with pytest.raises(toolkit.ValidationError) as caught:
+        helpers.call_action(
+            "resource_view_create",
+            resource_id=resource["id"],
+            view_type="umss_chart",
+            title="t",
+            **config,
+        )
+
+    assert helpers.call_action("resource_view_list", id=resource["id"]) == []
+    return caught.value.error_dict
+
+
+def test_number_step_requires_a_step():
+    config = {key: value for key, value in FULL_CONFIG.items() if key != "x_step"}
+
+    assert "x_step" in _refusal(**config)
+
+
+def test_a_step_is_forbidden_without_number_step():
+    """`x_step` is meaningful only for `number_step`; stored with any other
+    bucket it is a configuration the reader would have to guess about."""
+    assert "x_step" in _refusal(**{**FULL_CONFIG, "x_bucket": "value"})
+
+
+def test_count_forbids_a_y_field():
+    """`count` counts rows: a `y_field` beside it would silently change what
+    the publisher asked for."""
+    assert "y_field" in _refusal(**{**FULL_CONFIG, "y_agg": "count"})
+
+
+def test_every_other_aggregate_requires_a_y_field():
+    config = {key: value for key, value in FULL_CONFIG.items() if key != "y_field"}
+
+    for aggregate in ("count_distinct", "sum", "avg", "min", "max"):
+        assert "y_field" in _refusal(**{**config, "y_agg": aggregate}), aggregate
+
+
+def test_count_without_a_y_field_is_saved():
+    """The other half of the rule: the shape it forbids is the one it must also
+    allow, or the rule is only refusing."""
+    config = {key: value for key, value in FULL_CONFIG.items() if key != "y_field"}
+
+    created = _create_view(**{**config, "y_agg": "count"})
+    shown = helpers.call_action("resource_view_show", id=created["id"])
+
+    assert shown["y_agg"] == "count"
+    assert "y_field" not in shown or shown["y_field"] in (None, "")
+
+
+def test_x_bucket_is_required():
+    """L12: `x_bucket` is required and has no default. There is no sensible
+    one — a chart of raw values and a chart of yearly sums are different
+    charts — so a view saved without it would be a view nobody can draw."""
+    config = {key: value for key, value in FULL_CONFIG.items() if key != "x_bucket"}
+
+    assert "x_bucket" in _refusal(**config)
+
+
+def test_the_internal_id_is_never_charted():
+    """L12: `_id` is the DataStore's row key and `_full_text` its search
+    column; neither is a field a publisher chose, so neither can be an axis.
+    The error lands on the key that named it, not on the pair."""
+    assert "x_field" in _refusal(**{**FULL_CONFIG, "x_field": "_id"})
+    assert "y_field" in _refusal(**{**FULL_CONFIG, "y_field": "_id"})
+    assert "y_field" in _refusal(**{**FULL_CONFIG, "y_field": "_full_text"})

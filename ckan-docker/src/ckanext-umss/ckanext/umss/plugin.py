@@ -8,7 +8,9 @@ import sqlalchemy as sa
 from ckanext.umss import auth
 from ckanext.umss import charts
 from ckanext.umss import model as umss_model
+from ckanext.umss.logic.action import chart as chart_actions
 from ckanext.umss.logic.action import publication as publication_actions
+from ckanext.umss.logic.auth import chart as chart_auth
 from ckanext.umss.logic.auth import publication as publication_auth
 
 
@@ -69,6 +71,9 @@ class UmssPlugin(plugins.SingletonPlugin):
             "publication_request_cancel": publication_actions.publication_request_cancel,
             "publication_request_decide": publication_actions.publication_request_decide,
             "publication_request_list": publication_actions.publication_request_list,
+            # The chart action is the `umss_chart` view's reader (S6). The view
+            # is an `IResourceView` above; this is what draws it.
+            "umss_chart_data": chart_actions.umss_chart_data,
         }
 
     # IAuthFunctions
@@ -78,8 +83,8 @@ class UmssPlugin(plugins.SingletonPlugin):
 
         * the three **chained** functions that guard core's action names — the
           wall — whose rule and measurements live in `ckanext.umss.auth`;
-        * the four plain functions that authorize this extension's own actions
-          (D4).
+        * the plain functions that authorize this extension's own actions (D4),
+          the chart action among them.
 
         CKAN raises `ValueError('Authorization function not found: ...')` for an
         action with no auth function (`ckan/authz.py:235-254`), so these are not
@@ -93,6 +98,7 @@ class UmssPlugin(plugins.SingletonPlugin):
             "publication_request_cancel": publication_auth.publication_request_cancel,
             "publication_request_decide": publication_auth.publication_request_decide,
             "publication_request_list": publication_auth.publication_request_list,
+            "umss_chart_data": chart_auth.umss_chart_data,
         }
 
     # IPackageController
