@@ -109,6 +109,167 @@ export CKAN_DATASTORE_READ_URL="$DSR"
 export CKAN_SOLR_URL="$SOLR"
 export CKAN_SITE_ID="test.ckan.net"
 
+# `datastore_test` nace vacía: `30_setup_test_databases.sh` sólo hace
+# `CREATE DATABASE ... OWNER "$CKAN_DB_USER"`, sin el esquema que
+# `ckan datastore set-permissions` crea. Sin él, cada `datastore_create` de la
+# suite falla con `function populate_full_text_trigger() does not exist` y
+# `datastore_info` con `relation "_table_metadata" does not exist` (medido el
+# 2026-10-17). El SQL se le pide a CKAN en vez de copiarlo acá, para que no se
+# desincronice de la versión que trae la imagen, y se aplica una sola vez: si
+# los dos objetos ya están, esta corrida no imprime nada.
+#
+# Va después de los `export`s porque los toma de las URLs de test, y antes de
+# `pytest` porque la suite no arranca sin el esquema. El chequeo de la ruta no
+# alcanza: la ruta de la URL no es la base que el driver abre. Con psycopg2
+# 2.9.12, `.../datastore_test?dbname=datastore` abre `datastore` (medido en este
+# stack el 2026-10-17), y `target_guard.py` documenta el mismo efecto para
+# `?database=` vía SQLAlchemy. Por eso lo primero que se ejecuta es
+# `select current_database()` y todo lo demás depende de esa respuesta.
+#
+# El delimitador va entre
+# comillas (dobles: este payload no admite simples) para que bash entregue el
+# Python tal cual; lo vigila `tests/test-heredoc-quoting.sh`, y todo lo demás
+# `tests/test-umss-datastore-schema.sh`.
+python - "$SQL" "$DSW" "$DSR" <<"PY"
+import sys
+from urllib.parse import unquote, urlsplit
+
+# Lo que `set-permissions` crea y la suite necesita. Se pregunta por el nombre en
+# el catálogo, que se puede leer siempre, y no por el privilegio: que el rol de
+# la URL de escritura sea el dueño de la base se prueba en la corrida real.
+PROBES = (
+    ("populate_full_text_trigger",
+     "select count(*) from pg_proc where proname = %s"),
+    ("_table_metadata",
+     "select count(*) from pg_views where viewname = %s"),
+)
+
+
+def split_url(url):
+    parts = urlsplit(url)
+    return unquote(parts.username or ""), unquote(parts.path.lstrip("/"))
+
+
+def missing_objects(cur):
+    missing = []
+    for name, query in PROBES:
+        cur.execute(query, (name,))
+        if cur.fetchone()[0] == 0:
+            missing.append(name)
+    return missing
+
+
+def opened_problem(opened, expected):
+    # La ruta de la URL no es la base que el driver abre: con psycopg2 2.9.12,
+    # `.../datastore_test?dbname=datastore` abre `datastore` (medido en este stack
+    # el 2026-10-17), y `create_connect_args()` de SQLAlchemy resuelve `?database=`
+    # igual. La única fuente de verdad sobre lo que se abrió es el servidor.
+    if opened != expected:
+        return "el driver abrió " + str(opened) + ", no " + expected
+    if not opened.endswith("_test"):
+        return "el driver abrió " + str(opened) + ", que no es una base de test"
+    return None
+
+
+def connect_problem(sql, expected):
+    # psql ejecuta `\connect "x"`; psycopg2 no, y por eso esas líneas se tiran.
+    # Antes de tirarlas hay que comprobar que ninguna apuntaba a otra base: el SQL
+    # trae `\connect {datastoredb}` hoy, y eso es una observación, no un contrato.
+    seen = 0
+    for line in sql.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("\\"):
+            continue
+        # `\connect -reuse-previous=on db` es legal: los modificadores se saltean.
+        words = [w for w in stripped[1:].split() if not w.startswith("-")]
+        if not words or words[0] not in ("connect", "c"):
+            continue
+        seen += 1
+        if len(words) < 2:
+            return "el meta-comando " + stripped + " no nombra ninguna base"
+        target = words[1]
+        # La comilla doble se escribe `chr(34)` porque este payload no admite
+        # comillas simples ni siquiera dentro del heredoc: el `bash -lc` entero
+        # es un solo string entre simples del lado del host, y una suelta lo
+        # termina antes de tiempo.
+        target = target.strip(chr(34))
+        if target != expected:
+            return "el SQL se conecta a " + target + ", no a " + expected
+    if seen == 0:
+        return "el SQL no se conecta a ninguna base: no puedo verificar el destino"
+    return None
+
+
+def strip_meta(sql):
+    # Toda línea que empieza con barra invertida es un meta-comando de psql. No
+    # sobrevive ninguna: el destino ya se verificó, y la conexión es la de la URL
+    # de escritura.
+    return "\n".join(
+        line for line in sql.splitlines() if not line.strip().startswith("\\")
+    )
+
+
+def main(argv):
+    # Las dos importaciones que sólo existen dentro del contenedor van acá
+    # adentro: así `tests/test-umss-datastore-schema.sh` carga este mismo archivo
+    # en el host y ejercita las funciones puras sin CKAN y sin base de datos.
+    import psycopg2
+    from ckanext.datastore.cli import permissions_sql
+
+    mainuser, maindb = split_url(argv[0])
+    writeuser, datastoredb = split_url(argv[1])
+    readuser, _ = split_url(argv[2])
+
+    if not datastoredb.endswith("_test"):
+        print("test-umss: no aplico el esquema en " + datastoredb +
+              ": no es una base de test", file=sys.stderr)
+        return 1
+
+    conn = psycopg2.connect(argv[1])
+    try:
+        # Primera sentencia y sin excepción: la base que se abrió de verdad. Si
+        # no es la esperada, no se ejecuta nada más y esta conexión se cierra
+        # sin commit.
+        with conn.cursor() as cur:
+            cur.execute("select current_database()")
+            opened = cur.fetchone()[0]
+        problem = opened_problem(opened, datastoredb)
+        if problem is not None:
+            print("test-umss: no aplico el esquema del DataStore: " + problem,
+                  file=sys.stderr)
+            return 1
+        # De acá en adelante, la verificación de los `\connect` compara contra la
+        # base que se abrió, no contra el nombre que decía la ruta.
+        datastoredb = opened
+        with conn.cursor() as cur:
+            missing = missing_objects(cur)
+        if not missing:
+            return 0
+        sql = permissions_sql(maindb=maindb, datastoredb=datastoredb,
+                              mainuser=mainuser, writeuser=writeuser,
+                              readuser=readuser)
+        problem = connect_problem(sql, datastoredb)
+        if problem is not None:
+            # Nada se ejecutó: la única sentencia que corrió fue la sonda, y esta
+            # conexión se cierra sin commit.
+            print("test-umss: no aplico el esquema del DataStore: " + problem,
+                  file=sys.stderr)
+            return 1
+        with conn.cursor() as cur:
+            cur.execute(strip_meta(sql))
+        conn.commit()
+    finally:
+        conn.close()
+    print("test-umss: faltaba el esquema del DataStore en " + datastoredb +
+          " (" + ", ".join(missing) +
+          "); lo apliqué con set-permissions de CKAN")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+PY
+
 cd /srv/app/src_extensions/ckanext-umss
 python -m pytest --ckan-ini=test.ini "$@"
 ' _ "$@"
