@@ -49,7 +49,13 @@ La demo v0 corre el stack de **producción** en hs-node (la laptop del homelab),
 - Sirve los nombres `https://demo.odp.hs.lan` (portal) y `https://api.demo.odp.hs.lan` (CKAN, que es su `ckan.site_url`).
 - Fija `ORIGIN` en el frontend: detrás de Caddy, el proxy reenvía `http` y, sin ese valor, SvelteKit rechaza el login.
 
-1. **Secretos.** Copiá el ejemplo con `cp demo.env.example .env.demo && chmod 600 .env.demo` y completá cada valor vacío con uno nuevo, nunca con uno de dev. `ckan-docker/.env` lo comparte odp-dev: una clave que falte en `.env.demo` pasa el valor de dev. Por eso el ejemplo lista todas las claves y `tests/test-hs-demo-compose.sh` lo exige.
+1. **Secretos.** `bin/new-demo-env` escribe `.env.demo` a partir de `demo.env.example`, con modo 600:
+   - genera todos los secretos nuevos, nunca con valores de la plantilla ni de dev;
+   - arma las URLs de la base con las mismas contraseñas con que `db` crea los roles;
+   - no imprime ningún valor;
+   - no sobrescribe un archivo que ya existe, porque los roles de un volumen `odp-demo` existente conservan las contraseñas viejas.
+
+   `ckan-docker/.env` lo comparte odp-dev: una clave que falte en `.env.demo` pasa el valor de dev. Por eso el ejemplo lista todas las claves y `tests/test-hs-demo-compose.sh` lo exige. La contraseña de `ckan_admin` se lee con `grep '^CKAN_SYSADMIN_PASSWORD=' .env.demo`.
 2. **Nombres.** En casa, cada nombre necesita un rewrite en AdGuard (→ `192.168.1.201`). Fuera de casa no hay AdGuard: agregá a `/etc/hosts` la línea `127.0.0.1 demo.odp.hs.lan api.demo.odp.hs.lan`, porque Caddy escucha en `0.0.0.0:443`. El certificado lo emite la CA interna de Caddy (`tls internal`), así que el navegador tiene que confiar en esa raíz o vas a tener que aceptar el aviso.
 3. **Levantar.** Sin `--env-file .env.demo`, Compose se niega a arrancar porque falta `DEMO_HOST`.
 

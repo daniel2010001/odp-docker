@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# Writes the hs-node demo's `.env.demo` from `demo.env.example`, with fresh secrets.
+#
+# Run from anywhere:  bin/new-demo-env [output]      (default: <repo>/.env.demo)
+#
+# Why a script and not "fill it by hand": the production checklist in
+# odd/tasks/rotate-postgres-credentials.md (§ "Before production") asks that no
+# password or secret be a template default, and the six database URLs must embed
+# exactly the names and passwords the db service creates its roles with. A hand
+# edit gets one of them wrong, and it only shows up as a CKAN that cannot connect
+# on the first boot. Generating them together makes them consistent.
+#
+# What it does:
+#
+#   - Copies the example line by line: comments and non-empty values (DEMO_HOST,
+#     the database names) are kept; every empty key is filled.
+#   - Passwords are `openssl rand -hex 24` (URL-safe: they go inside URLs); other
+#     secrets are `openssl rand -hex 32`. The two JWT values are one shared
+#     `string:<hex>`. CKAN_SMTP_PASSWORD stays empty: the demo sends no mail.
+#   - An empty key it does not know is an error (non-zero exit, no file): a new
+#     secret in the example must not silently ship empty.
+#   - The file is built in a temp file in the output's directory, created with
+#     mode 600 (umask 077), then moved into place; the temp file is removed on
+#     every path.
+#   - An existing output is refused and left untouched: on a live odp-demo volume
+#     the db roles keep their old passwords, so a new .env.demo would lock CKAN out.
+#   - Never prints a generated value; stdout only names the file.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EXAMPLE="$REPO_ROOT/demo.env.example"
+OUT="${1:-$REPO_ROOT/.env.demo}"
+
+die() {
+	printf 'new-demo-env: %s\n' "$1" >&2
+	exit 1
+}
+
+refuse_existing() {
+	die "$OUT already exists; not overwriting it (the db roles of an existing odp-demo volume keep the old passwords)"
+}
+
+[[ -r "$EXAMPLE" ]] || die "cannot read $EXAMPLE"
+if [[ -e "$OUT" || -L "$OUT" ]]; then refuse_existing; fi
+OUT_DIR="$(dirname "$OUT")"
+[[ -d "$OUT_DIR" ]] || die "$OUT_DIR is not a directory"
+
+umask 077
+TMP="$(mktemp "$OUT.XXXXXX")" || die "cannot create a temporary file next to $OUT"
+trap 'rm -f "$TMP"' EXIT
+
+hex() { openssl rand -hex "$1"; }
+
+# First pass: the values of the example, so the URLs can use its names.
+declare -A V
+while IFS= read -r line || [[ -n "$line" ]]; do
+	[[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] && V[${BASH_REMATCH[1]}]="${BASH_REMATCH[2]}"
+done <"$EXAMPLE"
+
+PASSWORDS=(POSTGRES_PASSWORD CKAN_DB_PASSWORD DATASTORE_READONLY_PASSWORD CKAN_SYSADMIN_PASSWORD)
+SECRETS=(SESSION_SECRET CKAN___BEAKER__SESSION__SECRET)
+
+declare -A G
+for k in "${PASSWORDS[@]}"; do G[$k]="$(hex 24)" || die "openssl failed"; done
+for k in "${SECRETS[@]}"; do G[$k]="$(hex 32)" || die "openssl failed"; done
+jwt="$(hex 32)" || die "openssl failed"
+G[CKAN___API_TOKEN__JWT__ENCODE__SECRET]="string:$jwt"
+G[CKAN___API_TOKEN__JWT__DECODE__SECRET]="string:$jwt"
+G[CKAN_SMTP_PASSWORD]=""
+
+W="postgresql://${V[CKAN_DB_USER]}:${G[CKAN_DB_PASSWORD]}@db"
+R="postgresql://${V[DATASTORE_READONLY_USER]}:${G[DATASTORE_READONLY_PASSWORD]}@db"
+G[CKAN_SQLALCHEMY_URL]="$W/${V[CKAN_DB]}"
+G[CKAN_DATASTORE_WRITE_URL]="$W/${V[DATASTORE_DB]}"
+G[CKAN_DATASTORE_READ_URL]="$R/${V[DATASTORE_DB]}"
+G[TEST_CKAN_SQLALCHEMY_URL]="$W/ckan_test"
+G[TEST_CKAN_DATASTORE_WRITE_URL]="$W/datastore_test"
+G[TEST_CKAN_DATASTORE_READ_URL]="$R/datastore_test"
+
+# Second pass: write the file.
+while IFS= read -r line || [[ -n "$line" ]]; do
+	if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=$ ]]; then
+		key="${BASH_REMATCH[1]}"
+		[[ -v G[$key] ]] || die "$key is empty in demo.env.example and this script does not know how to fill it"
+		printf '%s=%s\n' "$key" "${G[$key]}"
+	else
+		printf '%s\n' "$line"
+	fi
+done <"$EXAMPLE" >"$TMP" || die "cannot write $TMP"
+
+# Fail rather than replace a file that appeared since the check above.
+if [[ -e "$OUT" || -L "$OUT" ]]; then refuse_existing; fi
+mv -n "$TMP" "$OUT" || die "cannot move the file into place"
+printf 'wrote %s (mode 600); no value printed\n' "$OUT"
