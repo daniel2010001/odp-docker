@@ -8,6 +8,19 @@ volumes:
   local_bin:
   home_dir:
 
+# XLoader settings shared by the web service and the worker. The envvars plugin maps
+# CKANEXT__XLOADER__X to ckanext.xloader.x (and overrides the ini). The submit runs in
+# `ckan-dev`, the job in `ckan-worker-dev`, and both write the jobs table, so both need these.
+x-xloader-env: &xloader-env
+  # Rewrites the scheme+netloc of the resource download URL: the worker reaches CKAN
+  # through the internal network, not through the public URL.
+  CKANEXT__XLOADER__SITE_URL: http://ckan-dev:5000
+  # The CKAN database, never sqlite in /tmp (lost on restart, not shared by the two
+  # containers) and never the DataStore DB (the `jobs` table stores `api_key`).
+  CKANEXT__XLOADER__JOBS_DB__URI: ${CKAN_SQLALCHEMY_URL}
+  # dd/mm/yyyy dates; pairs with the DataStore database DateStyle `ISO, DMY`.
+  CKANEXT__XLOADER__PARSE_DATES_DAYFIRST: "true"
+
 services:
 
   ckan-dev:
@@ -19,6 +32,8 @@ services:
         - TZ=${TZ}
     env_file:
       - .env
+    environment:
+      <<: *xloader-env
     links:
       - db
       - solr
@@ -42,15 +57,36 @@ services:
       timeout: 10s
       retries: 3
 
-  datapusher:
+  # `ckan jobs worker`: consumes the RQ queue where xloader's jobs go. Without it jobs
+  # pile up in Redis and nothing is ever loaded into the DataStore. Same image and volumes
+  # as `ckan-dev` (so the live ./src extension and the volume-held installs match); no ports.
+  ckan-worker-dev:
     platform: linux/amd64
-    image: ckan/ckan-base-datapusher:${DATAPUSHER_VERSION}
+    build:
+      context: ckan/
+      dockerfile: Dockerfile.dev
+      args:
+        - TZ=${TZ}
+    env_file:
+      - .env
+    environment:
+      <<: *xloader-env
+    links:
+      - db
+      - solr
+      - redis
+    depends_on:
+      ckan-dev:
+        condition: service_healthy
+    volumes:
+      - ckan_storage:/var/lib/ckan
+      - ./src:/srv/app/src_extensions
+      - pip_cache:/root/.cache/pip
+      - site_packages_py314:/usr/local/lib/python3.14/site-packages
+      - local_bin:/usr/local/bin
+      - home_dir:/srv/app/
+    command: ["/srv/worker/start_ckan_worker.sh"]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:8800"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
 
   db:
     build:

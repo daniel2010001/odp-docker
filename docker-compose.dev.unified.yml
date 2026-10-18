@@ -18,7 +18,7 @@
 name: odp-dev
 
 include:
-  # CKAN dev: ckan-dev + db + solr + redis + datapusher, con ./src montado
+  # CKAN dev: ckan-dev + ckan-worker-dev + db + solr + redis, con ./src montado
   # en /srv/app/src_extensions (la extensión umss se recarga en vivo).
   - ./ckan-docker/docker-compose.dev.yml
 
@@ -46,6 +46,8 @@ services:
       # y el `SUCCESS` de ese CLI no prueba nada: con `-p <plugin>` y `--skip-core` es un
       # no-op silencioso. El script corre la migración y **verifica la tabla**.
       - ./ckan-docker/ckan/docker-entrypoint.d/03_upgrade_umss_schema.sh:/docker-entrypoint.d/03_upgrade_umss_schema.sh:ro
+      # DateStyle `ISO, DMY` del DataStore en volúmenes existentes (xloader con dayfirst).
+      - ./ckan-docker/ckan/docker-entrypoint.d/04_datastore_datestyle.sh:/docker-entrypoint.d/04_datastore_datestyle.sh:ro
 
     # ─── Andamiaje de DEV (homelab) — NO es el diseño de producción ───
     # CKAN necesita un ORIGEN PROPIO para que el navegador pueda cargar sus
@@ -74,6 +76,12 @@ services:
       - "caddy=api.odp.hs.lan"
       - "caddy.tls=internal"
       - "caddy.reverse_proxy={{upstreams 5000}}"
+
+  # ─── Override del ckan-worker-dev incluido: misma imagen que ckan-dev ──
+  ckan-worker-dev:
+    build:
+      context: ./ckan-docker
+      dockerfile: Dockerfile.dev.umss
 
   # ─── Frontend Vite dev server (HMR) ─────────────────────────
   frontend-dev:
