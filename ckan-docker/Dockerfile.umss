@@ -18,6 +18,12 @@ COPY --chown=ckan-sys:ckan-sys ckan/patches ${APP_DIR}/patches
 
 USER root
 
+# `ckan/ckan-base:2.12` ships no `patch` (`ckan-dev` does), so the loop below failed the
+# production build with `/bin/sh: 1: patch: not found`. Measured 2026-10-17.
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends patch && \
+    rm -rf /var/lib/apt/lists/*
+
 # The patch loop below modifies `ckan/views/*`, and the 2.12 images ship the CKAN source tree
 # owned by `ckan-sys` with group read-only: as the `ckan` user, `patch` cannot even create its temp
 # file in that directory (drwxr-xr-x), so the build fails. Root for the loop, then back.
