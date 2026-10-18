@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+#
+# Creates the hs-node demo's users and their organization roles through the
+# CKAN action API. The portal seed creates the organizations; this never does.
+#
+#   CKAN_URL=<base url> CKAN_API_TOKEN=<sysadmin token> bin/provision-demo-users [credentials-file]
+#
+# The credentials file (default: <repo>/.demo-users, mode 600) gets one
+# `<name> <password>` line per user created now. Existing users are left alone.
+# Over https with Caddy's internal CA, set CURL_CA_BUNDLE=<Caddy root.crt>:
+# curl honours it natively.
+#
+# Secrets stay out of every argv (visible in `ps`): the token goes in a header
+# read from a process-substitution file, JSON bodies through stdin, and jq
+# reads the password from its environment, never from --arg.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CREDS="${1:-$REPO_ROOT/.demo-users}"
+
+# name:org:role, in the order they are created.
+USERS=(
+	"admin-fcyt:fcyt:admin"
+	"editor-fcyt:fcyt:editor"
+	"miembro-fcyt:fcyt:member"
+	"editor-fcs:fcs:editor"
+)
+
+die() {
+	printf 'provision-demo-users: %s\n' "$1" >&2
+	exit "${2:-1}"
+}
+
+if [[ -z "$CKAN_URL" || -z "$CKAN_API_TOKEN" ]]; then
+	printf 'Usage: CKAN_URL=<base url> CKAN_API_TOKEN=<sysadmin token> %s [credentials-file]\n' "$0" >&2
+	exit 2
+fi
+
+BODY="" HTTP=""
+# api <action> <json>: sets HTTP and BODY; exits 1 only if curl itself fails.
+api() {
+	local out
+	out="$(curl -sS -X POST -w '\n%{http_code}' \
+		-H @<(printf 'Authorization: %s\n' "$CKAN_API_TOKEN") \
+		-H 'Content-Type: application/json' \
+		--data-binary @- "${CKAN_URL%/}/api/3/action/$1" <<<"$2")" || die "$1 failed: curl error"
+	HTTP="${out##*$'\n'}"
+	BODY="${out%$'\n'*}"
+}
+ok() { [[ "$HTTP" =~ ^2[0-9][0-9]$ ]] && [[ "$(jq -r '.success' <<<"$BODY" 2>/dev/null)" == true ]]; }
+fail_api() {
+	local msg
+	msg="$(jq -r '.error.message // (.error | tostring)' <<<"$BODY" 2>/dev/null)"
+	[[ -z "$msg" || "$msg" == null ]] && msg="HTTP $HTTP"
+	die "$1 failed: $msg"
+}
+
+# Preflight: every organization exists before any write.
+declare -A seen
+for entry in "${USERS[@]}"; do
+	IFS=: read -r _ org _ <<<"$entry"
+	[[ -n "${seen[$org]}" ]] && continue
+	seen[$org]=1
+	api organization_show "$(jq -cn --arg id "$org" '{id: $id}')"
+	if ok; then continue; fi
+	[[ "$HTTP" == 404 ]] && die "organization $org does not exist; run the portal seed first"
+	fail_api organization_show
+done
+
+for entry in "${USERS[@]}"; do
+	IFS=: read -r name org role <<<"$entry"
+	api user_show "$(jq -cn --arg id "$name" '{id: $id}')"
+	if ok; then
+		verb=exists
+	elif [[ "$HTTP" == 404 ]]; then
+		password="$(openssl rand -hex 16)" && [[ -n "$password" ]] || die "openssl failed"
+		api user_create "$(DEMO_PASSWORD="$password" jq -cn --arg n "$name" --arg e "$name@example.invalid" \
+			'{name: $n, email: $e, password: env.DEMO_PASSWORD}')"
+		ok || fail_api user_create
+		(umask 077 && printf '%s %s\n' "$name" "$password" >>"$CREDS")
+		verb=created
+	else
+		fail_api user_show
+	fi
+	api organization_member_create "$(jq -cn --arg o "$org" --arg u "$name" --arg r "$role" \
+		'{id: $o, username: $u, role: $r}')"
+	ok || fail_api organization_member_create
+	if [[ "$verb" == created ]]; then
+		printf 'created %s (%s of %s)\n' "$name" "$role" "$org"
+	else
+		printf 'exists %s; %s of %s ensured\n' "$name" "$role" "$org"
+	fi
+done
