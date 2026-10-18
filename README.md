@@ -32,6 +32,8 @@ Antes del primer `up`, crear `.env` en la **raíz** de este repo a partir de `.e
 
 Ojo con los nombres: una variable del `.env` raíz **también pisa** a la del mismo nombre en `ckan-docker/.env` (medido con docker compose 5.6.0), así que el `.env` raíz no debe repetir nombres de ese archivo.
 
+Ojo con la versión de Compose: `docker-compose.unified.yml` redefine `ckan` y `ckan-worker`, que trae por `include`. Docker Compose 5.6.0 lo acepta. El Compose que trae la imagen `ubuntu-24.04` de GitHub Actions (20261012) lo rechaza con `services.ckan conflicts with imported resource`, así que el CI instala 5.6.0. Antes de levantar en un host nuevo, mirá `docker compose version`.
+
 ```sh
 cp .env.example .env    # y completar SESSION_SECRET
 docker compose -f docker-compose.unified.yml up --build -d
@@ -39,6 +41,39 @@ docker compose -f docker-compose.unified.yml up --build -d
 
 - Frontend: http://localhost:8080
 - CKAN API (vía proxy): http://localhost:8080/api/3/action/status_show
+
+## Demo en hs-node
+
+La demo v0 corre el stack de **producción** en hs-node (la laptop del homelab), detrás de su Caddy y **en lugar de** odp-dev: en la RAM entra un solo stack CKAN. El override `docker-compose.hs.yml` hace cuatro cosas:
+
+- Usa el proyecto `odp-demo`, con volúmenes propios, así que los de odp-dev no se tocan.
+- No publica puertos en el host y no levanta el nginx con TLS de CKAN.
+- Sirve los nombres `https://demo.odp.hs.lan` (portal) y `https://api.demo.odp.hs.lan` (CKAN, que es su `ckan.site_url`).
+- Fija `ORIGIN` en el frontend: detrás de Caddy, el proxy reenvía `http` y, sin ese valor, SvelteKit rechaza el login.
+
+1. **Secretos.** `bin/new-demo-env` escribe `.env.demo` a partir de `demo.env.example`, con modo 600:
+   - genera todos los secretos nuevos, nunca con valores de la plantilla ni de dev;
+   - arma las URLs de la base con las mismas contraseñas con que `db` crea los roles;
+   - no imprime ningún valor;
+   - no sobrescribe un archivo que ya existe, porque los roles de un volumen `odp-demo` existente conservan las contraseñas viejas.
+
+   `ckan-docker/.env` lo comparte odp-dev: una clave que falte en `.env.demo` pasa el valor de dev. Por eso el ejemplo lista todas las claves y `tests/test-hs-demo-compose.sh` lo exige. La contraseña de `ckan_admin` se lee con `grep '^CKAN_SYSADMIN_PASSWORD=' .env.demo`.
+2. **Nombres.** En casa, cada nombre necesita un rewrite en AdGuard (→ `192.168.1.201`). Fuera de casa no hay AdGuard: agregá a `/etc/hosts` la línea `127.0.0.1 demo.odp.hs.lan api.demo.odp.hs.lan`, porque Caddy escucha en `0.0.0.0:443`. El certificado lo emite la CA interna de Caddy (`tls internal`), así que el navegador tiene que confiar en esa raíz o vas a tener que aceptar el aviso.
+3. **Levantar.** Sin `--env-file .env.demo`, Compose se niega a arrancar porque falta `DEMO_HOST`.
+
+   ```sh
+   docker compose -f docker-compose.dev.unified.yml stop
+   docker compose -f docker-compose.unified.yml -f docker-compose.hs.yml --env-file .env.demo up -d --build
+   ```
+
+4. **Volver a dev.** `stop` no borra nada, y un stack detenido sigue detenido después de reiniciar (`restart: unless-stopped`).
+
+   ```sh
+   docker compose -f docker-compose.unified.yml -f docker-compose.hs.yml --env-file .env.demo stop
+   docker compose -f docker-compose.dev.unified.yml start
+   ```
+
+En el primer arranque, sobre este stack se corren los chequeos del issue #25.
 
 ## Servicios
 
@@ -86,12 +121,12 @@ nginx reverse proxy same-origin: el frontend se build-ea con `PUBLIC_CKAN_URL` v
 
 | job | qué verifica | coste |
 |---|---|---|
-| `shell-tests` | que los `docker-entrypoint.d/*.sh` parseen, y que pasen todos los `ckan-docker/*/tests/*.sh` y `tests/*.sh` | segundos, sin Docker |
+| `shell-tests` | que los `docker-entrypoint.d/*.sh` parseen, y que pasen todos los `ckan-docker/*/tests/*.sh` y `tests/*.sh` | segundos, sin daemon de Docker (`test-hs-demo-compose.sh` usa el CLI de Compose y `jq`) |
 | `umss-tests` | la suite de `ckanext-umss` en `ckan/ckan-dev:2.12` con solr, postgres y redis | minutos |
 
 Los workflows que viven dentro de `ckan-docker/.github/` y de `ckan-docker/src/ckanext-umss/.github/` pertenecen a sus repos upstream: GitHub **no** los ejecuta aquí, porque sólo lee `.github/workflows/` en la raíz del repo.
 
-El job liviano son, literalmente, estos dos loops; localmente no hace falta Docker. El `[ -e ... ] || continue` que el workflow agrega sólo evita que un glob vacío falle por accidente:
+El job liviano son, literalmente, estos dos loops; localmente no hace falta el daemon de Docker. El `[ -e ... ] || continue` que el workflow agrega sólo evita que un glob vacío falle por accidente:
 
 ```sh
 for f in ckan-docker/*/docker-entrypoint.d/*.sh; do bash -n "$f"; done
