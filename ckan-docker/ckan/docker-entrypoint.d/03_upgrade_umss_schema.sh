@@ -26,7 +26,7 @@
 #    `/srv/app/start_ckan.sh` — so an `exit` here would kill PID 1. The container
 #    is `restart: unless-stopped`, so a failed migration must leave a loud trail
 #    instead of becoming a crash loop. This file is therefore only valid when it is
-#    sourced, exactly like `01_setup_datapusher.sh`.
+#    sourced, exactly like `01_setup_xloader.sh`.
 #
 # Ordering is safe in both paths: the base entrypoint runs the core schema step
 # first (`prerun.py` in dev) and sources `/docker-entrypoint.d/*` afterwards.
