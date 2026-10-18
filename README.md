@@ -58,6 +58,14 @@ Los CSV y Excel subidos como recurso se cargan al DataStore con **ckanext-xloade
 
 Pendiente, sin resolver: si un cambio de tipo falla, la tabla puede quedar a medias o borrarse (medido en `odd/tasks/loader-eval.md`).
 
+**Seguridad: el token de servicio de xloader.** `01_setup_xloader.sh` lo mintea para el sysadmin (365 días), y xloader 2.6.0 lo guarda en cada fila de su tabla `jobs`: `db.delete_api_key` existe, pero nadie la llama. Sin la cadena de `ckanext-umss` (`logic/action/xloader.py`), `xloader_status` lo devuelve en `task_info.api_key` a cualquiera con `resource_update` sobre el recurso, es decir, a cualquier editor del dataset. La cadena saca esa clave de la respuesta y no cambia nada más. La clave sigue **guardada en texto plano** en la tabla `jobs` de la base de CKAN y en sus backups: quien lea la base o un backup obtiene un token sysadmin, y por eso los tokens viejos se revocan (punto 2).
+
+A verificar en producción en el primer arranque, y otra vez después de cada actualización de xloader o de CKAN:
+
+1. Llamar a `xloader_status` sobre un recurso ya cargado, con un token propio. La respuesta no debe tener `api_key` en `task_info` ni ningún string con forma de JWT. Si aparece, la cadena no está activa, y eso no da error ni queda en el log. Revisar que el plugin se llame `xloader`, que `umss` esté en `CKAN__PLUGINS` y, por las dudas, que vaya después de `xloader`. Leyendo el código de CKAN, el orden no debería importar, pero no está medido.
+2. Contar los tokens del sysadmin con `ckan user token list <sysadmin>`. Cada arranque mintea un token `xloader` nuevo y no revoca el anterior, así que se acumulan tokens sysadmin válidos por un año. Revocar los viejos. Si existen tokens `datapusher` de antes del cambio, revocarlos todos.
+3. Si una versión nueva de xloader ya borra la clave por sí misma (`delete_api_key` llamada), la cadena sobra, pero no rompe nada.
+
 **Stack dev existente:** reconstruir la imagen no alcanza. Los volúmenes `home_dir` (`/srv/app`), `site_packages_py314` y `local_bin` de `docker-compose.dev.yml` tapan lo que pip instala en la imagen, así que xloader no aparece hasta recrearlos. Los datos (`pg_data`, `ckan_storage`, `solr_data`) no se tocan:
 
 ```sh

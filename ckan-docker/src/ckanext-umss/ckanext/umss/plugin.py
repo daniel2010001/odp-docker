@@ -10,6 +10,7 @@ from ckanext.umss import charts
 from ckanext.umss import model as umss_model
 from ckanext.umss.logic.action import chart as chart_actions
 from ckanext.umss.logic.action import publication as publication_actions
+from ckanext.umss.logic.action import xloader as xloader_actions
 from ckanext.umss.logic.auth import chart as chart_auth
 from ckanext.umss.logic.auth import publication as publication_auth
 
@@ -66,7 +67,7 @@ class UmssPlugin(plugins.SingletonPlugin):
         refuses `member`, a cross-organization `editor` and anonymous callers
         before the wall runs. So no raw core call is a second, unrecorded door.
         """
-        return {
+        actions = {
             "publication_request_create": publication_actions.publication_request_create,
             "publication_request_cancel": publication_actions.publication_request_cancel,
             "publication_request_decide": publication_actions.publication_request_decide,
@@ -75,6 +76,14 @@ class UmssPlugin(plugins.SingletonPlugin):
             # is an `IResourceView` above; this is what draws it.
             "umss_chart_data": chart_actions.umss_chart_data,
         }
+        # Unchained, `xloader_status` hands the sysadmin's xloader token to any
+        # dataset editor (see `logic/action/xloader.py`). Chaining an action
+        # nobody defines makes CKAN raise `NotFound` at load, so the chain only
+        # exists where xloader does; `umss` comes after `xloader` in
+        # `CKAN__PLUGINS`, so it is already loaded here.
+        if plugins.plugin_loaded("xloader"):
+            actions["xloader_status"] = xloader_actions.xloader_status
+        return actions
 
     # IAuthFunctions
 
