@@ -8,3 +8,6 @@
 *.log
 # Local Pi runtime state
 .atl/
+
+# Contraseñas de la demo (bin/provision-demo-users)
+.demo-users

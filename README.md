@@ -66,7 +66,19 @@ La demo v0 corre el stack de **producción** en hs-node (la laptop del homelab),
    docker compose -f docker-compose.unified.yml -f docker-compose.hs.yml --env-file .env.demo up -d --build
    ```
 
-4. **Volver a dev.** `stop` no borra nada, y un stack detenido sigue detenido después de reiniciar (`restart: unless-stopped`).
+4. **Datos de la demo.** Primero el seed del portal crea las organizaciones y los datasets; después `bin/provision-demo-users` crea los usuarios y sus roles (`admin-fcyt`, `editor-fcyt`, `miembro-fcyt`, `editor-fcs`). Si falta una organización, se niega a escribir y pide correr el seed.
+
+   ```sh
+   # desde ../odp (con https necesita NODE_EXTRA_CA_CERTS=<root.crt de Caddy>)
+   CKAN_URL=… CKAN_API_TOKEN=… node scripts/seed-ckan.mjs
+
+   # desde este repo (con https necesita CURL_CA_BUNDLE=<root.crt de Caddy>)
+   CKAN_URL=… CKAN_API_TOKEN=… bin/provision-demo-users
+   ```
+
+   La raíz de Caddy está en el contenedor de caddy-docker-proxy, en `/data/caddy/pki/authorities/local/root.crt`: copiala con `docker cp`. Las contraseñas quedan en `.demo-users` (modo 600, fuera de git); volver a correr el script no recrea usuarios ni toca ese archivo.
+
+5. **Volver a dev.** `stop` no borra nada, y un stack detenido sigue detenido después de reiniciar (`restart: unless-stopped`).
 
    ```sh
    docker compose -f docker-compose.unified.yml -f docker-compose.hs.yml --env-file .env.demo stop
