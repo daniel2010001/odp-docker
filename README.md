@@ -32,6 +32,8 @@ Antes del primer `up`, crear `.env` en la **raíz** de este repo a partir de `.e
 
 Ojo con los nombres: una variable del `.env` raíz **también pisa** a la del mismo nombre en `ckan-docker/.env` (medido con docker compose 5.6.0), así que el `.env` raíz no debe repetir nombres de ese archivo.
 
+Ojo con la versión de Compose: `docker-compose.unified.yml` redefine `ckan` y `ckan-worker`, que trae por `include`. Docker Compose 5.6.0 lo acepta. El Compose que trae la imagen `ubuntu-24.04` de GitHub Actions (20261012) lo rechaza con `services.ckan conflicts with imported resource`, así que el CI instala 5.6.0. Antes de levantar en un host nuevo, mirá `docker compose version`.
+
 ```sh
 cp .env.example .env    # y completar SESSION_SECRET
 docker compose -f docker-compose.unified.yml up --build -d

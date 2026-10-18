@@ -18,6 +18,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Docker Compose 5.6.0
+        # `tests/test-hs-demo-compose.sh` resolves the real compose files, and
+        # `docker-compose.unified.yml` redefines services it `include`s (ckan,
+        # ckan-worker). The runner's bundled Compose refuses that with
+        # "services.ckan conflicts with imported resource" (ubuntu-24.04 image
+        # 20261012); 5.6.0, the version the stack runs on, accepts it. Pinned and
+        # checksum-verified so the job never tests against a different Compose.
+        run: |
+          mkdir -p ~/.docker/cli-plugins
+          curl -fsSL -o ~/.docker/cli-plugins/docker-compose \
+            https://github.com/docker/compose/releases/download/v5.6.0/docker-compose-linux-x86_64
+          echo "40343e21ca777173e69cff5dbafeb37c6f81f3b0d57d9e597f036e95eb63e76a  $HOME/.docker/cli-plugins/docker-compose" | sha256sum -c -
+          chmod +x ~/.docker/cli-plugins/docker-compose
+          docker compose version
+
       - name: Syntax-check the entrypoint scripts
         # `Dockerfile.dev` COPYs these into the image and
         # `/srv/app/start_ckan_development.sh` sources them at every start, so a

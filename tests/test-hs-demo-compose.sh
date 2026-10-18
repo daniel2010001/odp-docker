@@ -137,7 +137,7 @@ done
 
 write_demo_env
 if ! demo_config >"$S/demo.json" 2>"$S/demo.err"; then
-	fail "config with the override exits non-zero: $(head -c 400 "$S/demo.err")"
+	fail "config with the override exits non-zero ($(docker compose version 2>&1)): $(head -c 400 "$S/demo.err")"
 	finish
 fi
 pass "config with the override and --env-file .env.demo exits 0"
