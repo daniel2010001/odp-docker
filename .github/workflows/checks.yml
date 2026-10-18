@@ -34,8 +34,9 @@ jobs:
 
       - name: Run the host tests
         # Every `ckan-docker/*/tests/*.sh` and `tests/*.sh` is self-contained: it
-        # stubs the commands it needs, so it runs here in milliseconds without
-        # Docker. `tests/` holds the guards whose subject is the root compose. The
+        # stubs the commands it needs, so it runs here in milliseconds without the
+        # Docker daemon (`tests/test-hs-demo-compose.sh` uses the runner's Compose CLI
+        # and jq for `config`). `tests/` holds the guards whose subject is the root compose. The
         # globs mean a new test file is picked up without editing this workflow.
         run: |
           status=0

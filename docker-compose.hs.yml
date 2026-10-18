@@ -1,0 +1,87 @@
+# docker-compose.hs.yml
+#
+# Override del stack de PRODUCCIÓN para la demo v0 en hs-node (la laptop del
+# homelab), detrás de su caddy-docker-proxy. Reemplaza a odp-dev mientras corre:
+# en la RAM de hs-node entra un solo stack CKAN.
+#
+# Uso (desde la raíz del repo, con odp-dev detenido):
+#   docker compose -p odp-dev stop
+#   docker compose -f docker-compose.unified.yml -f docker-compose.hs.yml \
+#     --env-file .env.demo up -d --build
+#   # portal -> https://demo.odp.hs.lan
+#   # CKAN   -> https://api.demo.odp.hs.lan/api/3/action/status_show
+#
+# Qué cambia respecto de docker-compose.unified.yml:
+#   - Proyecto propio (`odp-demo`): volúmenes propios, los de odp-dev no se tocan.
+#   - Caddy es la única entrada: ningún puerto publicado en el host (regla del
+#     homelab), y el nginx con TLS propio de CKAN no arranca (sobra detrás de
+#     Caddy). frontend-proxy y ckan se unen a la red externa `hs-net`.
+#   - Secretos propios: `.env.demo` (ver `demo.env.example`, modo 600). Hace dos
+#     cosas, por eso va en `--env-file` Y en `env_file`:
+#       * `--env-file` reemplaza al `.env` de la raíz en la interpolación de TODOS
+#         los archivos, el `include` incluido (db, xloader, SESSION_SECRET).
+#       * `env_file` se suma al `ckan-docker/.env` de ckan y ckan-worker, y gana:
+#         ese `.env` lo comparte odp-dev, y sin esto CKAN arrancaría con sus
+#         secretos. Una clave que falte en `.env.demo` pasa el valor de dev: por
+#         eso el ejemplo las lista todas y `tests/test-hs-demo-compose.sh` lo exige.
+#
+# Los nombres salen de DEMO_HOST. No pueden ser los de odp-dev (odp.hs.lan,
+# api.odp.hs.lan): caddy-docker-proxy junta las labels del mismo host y
+# balancearía entre los dos stacks. Cada nombre necesita su rewrite en AdGuard
+# (→ 192.168.1.201) y, fuera de casa, una línea en /etc/hosts (→ 127.0.0.1).
+
+name: odp-demo
+
+# Sin `--env-file .env.demo` (o sin DEMO_HOST en él), Compose se niega a arrancar.
+x-demo-site-url: &demo-site-url
+  # `ckan.site_url` es el origen público PROPIO de CKAN, con el esquema del portal:
+  # CKAN firma sus URLs absolutas con él, y el visor de PDF del portal las abre en
+  # un <iframe>. Gana sobre el CKAN_SITE_URL de `ckan-docker/.env` (environment > env_file).
+  CKAN_SITE_URL: https://api.${DEMO_HOST:?falta DEMO_HOST, correr con --env-file .env.demo (ver demo.env.example)}
+
+services:
+
+  # El nginx con TLS propio de CKAN no arranca: Caddy hace el TLS y frontend-proxy
+  # ya va directo a ckan:5000. Sin esto publicaría NGINX_SSLPORT_HOST en el host.
+  nginx:
+    profiles: ["ckan-tls-nginx"]
+
+  ckan:
+    env_file:
+      - .env.demo
+    environment:
+      <<: *demo-site-url
+    # Se SUMA a las redes del archivo incluido (merge de -f, no override de include).
+    networks:
+      - hs-net
+    labels:
+      - "caddy=api.${DEMO_HOST:?falta DEMO_HOST, correr con --env-file .env.demo (ver demo.env.example)}"
+      - "caddy.tls=internal"
+      - "caddy.reverse_proxy={{upstreams 5000}}"
+
+  ckan-worker:
+    env_file:
+      - .env.demo
+    environment:
+      <<: *demo-site-url
+
+  frontend:
+    environment:
+      # Detrás de Caddy, frontend-proxy recibe HTTP y reenvía `X-Forwarded-Proto: http`.
+      # Sin ORIGIN, adapter-node deduce `http://...` y SvelteKit rechaza todo POST de
+      # formulario (el login incluido), porque el navegador manda `Origin: https://...`.
+      ORIGIN: https://${DEMO_HOST:?falta DEMO_HOST, correr con --env-file .env.demo (ver demo.env.example)}
+
+  frontend-proxy:
+    # Sin el 8080:80 del compose de prod: al stack se entra sólo por Caddy.
+    ports: !reset []
+    networks:
+      - hs-net
+    labels:
+      - "caddy=${DEMO_HOST:?falta DEMO_HOST, correr con --env-file .env.demo (ver demo.env.example)}"
+      - "caddy.tls=internal"
+      - "caddy.reverse_proxy={{upstreams 80}}"
+
+networks:
+  hs-net:
+    external: true
