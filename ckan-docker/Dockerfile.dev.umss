@@ -3,6 +3,7 @@
 #
 # Difference vs Dockerfile.umss (production): editable install + the runtime
 # bind mount (./src:/srv/app/src_extensions) keeps the extension hot-reloadable.
+# Both images also carry ckanext-xloader 2.6.0 and the ckan-worker start script.
 
 FROM ckan/ckan-dev:2.12
 
@@ -13,9 +14,38 @@ COPY --chown=ckan-sys:ckan-sys src/ckanext-umss /srv/app/src_extensions/ckanext-
 USER root
 RUN pip3 install -e /srv/app/src_extensions/ckanext-umss
 
+# ckanext-xloader 2.6.0 replaces the DataPusher as the DataStore loader.
+# Three steps, each for a measured reason:
+#   1. `--no-deps -e` from the PyPI sdist: the editable install is required, not a style
+#      choice. A non-editable one does NOT import in the dev image (pip 26 / setuptools 84
+#      ship no `pkg_resources`, and the umss editable install writes an nspkg `.pth` that
+#      fixes `ckanext.__path__` to the editable checkouts). The sdist and not `git+`:
+#      `ckan/ckan-base:2.12` ships no git, so a `git+` install fails the production build.
+#      `--no-deps` because its pins would otherwise move packages CKAN already runs on.
+#   2. Its runtime dependencies, constrained by this image's own `pip freeze` (minus `-e`
+#      and ` @ ` lines: pip refuses editable constraints). Measured: 15 packages added,
+#      0 changed. `pip check` still names certifi/idna/urllib3 below xloader's floors;
+#      that is the combination loader-eval Runs 4-5 validated, accepted on purpose.
+#   3. An import check at build time, from the app dir, so a broken install fails the
+#      build and not the first boot.
+RUN cd ${SRC_DIR} && \
+    pip3 download --no-deps --no-binary ckanext-xloader -d /tmp/xloader ckanext-xloader==2.6.0 && \
+    mkdir ckanext-xloader && \
+    tar -xzf /tmp/xloader/ckanext_xloader-2.6.0.tar.gz -C ckanext-xloader --strip-components=1 && \
+    rm -rf /tmp/xloader && \
+    pip3 install --no-deps -e ./ckanext-xloader && \
+    pip3 freeze 2>/dev/null | grep -v -e '^-e' -e ' @ ' > /tmp/constraints.txt && \
+    pip3 install -c /tmp/constraints.txt tabulator==1.53.5 Unidecode==1.4.0 chardet==7.6.0 zipp && \
+    rm /tmp/constraints.txt && \
+    cd ${APP_DIR} && python3 -c "import ckanext.xloader.plugin"
+
 # Standard ckan-docker additions (entrypoint scripts + patches), same as Dockerfile.dev
 COPY --chown=ckan-sys:ckan-sys ckan/docker-entrypoint.d/* /docker-entrypoint.d/
 COPY --chown=ckan-sys:ckan-sys ckan/patches ${APP_DIR}/patches
+
+# Start script of the `ckan-worker` service. Under /srv/worker, outside every dev volume
+# (/srv/app, /usr/local/bin, site-packages), so a stale volume cannot hide it.
+COPY --chown=ckan-sys:ckan-sys --chmod=755 ckan/worker/start_ckan_worker.sh /srv/worker/start_ckan_worker.sh
 
 USER root
 

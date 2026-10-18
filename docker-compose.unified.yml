@@ -4,7 +4,7 @@
 # reverse proxy nginx (same-origin), sin necesidad de CORS.
 #
 # Estructura:
-#   - `include` trae el stack CKAN completo (nginx, ckan, datapusher, db,
+#   - `include` trae el stack CKAN completo (nginx, ckan, ckan-worker, db,
 #     solr, redis) y sus redes (webnet, ckannet, solrnet, dbnet, redisnet).
 #   - `frontend`        : app SvelteKit compilada con adapter-node (build/).
 #                         Expone solo 3000 interno, sin puerto host.
@@ -32,6 +32,12 @@ services:
   # Reemplaza el build del docker-compose.yml de ckan-docker para
   # hornear ckanext-umss dentro de la imagen de producción.
   ckan:
+    build:
+      context: ./ckan-docker
+      dockerfile: Dockerfile.umss
+
+  # Mismo build que `ckan`: el worker de xloader corre la misma imagen.
+  ckan-worker:
     build:
       context: ./ckan-docker
       dockerfile: Dockerfile.umss

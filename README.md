@@ -46,7 +46,27 @@ docker compose -f docker-compose.unified.yml up --build -d
 |---|---|
 | `frontend` | SvelteKit (adapter-node), puerto 3000 interno |
 | `frontend-proxy` | nginx: `/` → frontend, `/api/` → ckan (puerto 8080 host) |
-| `ckan`, `db`, `solr`, `redis`, `datapusher`, `nginx` | stack CKAN (traído vía `include` de `ckan-docker`) |
+| `ckan`, `ckan-worker`, `db`, `solr`, `redis`, `nginx` | stack CKAN (traído vía `include` de `ckan-docker`) |
+
+## Carga al DataStore (xloader)
+
+Los CSV y Excel subidos como recurso se cargan al DataStore con **ckanext-xloader 2.6.0** (reemplazó a DataPusher 0.0.21, que guardaba fechas dd/mm como mm/dd sin avisar). Tres piezas:
+
+- **`ckan-worker`** (`ckan-worker-dev` en dev): corre `ckan jobs worker` con la misma imagen que `ckan`. Sin él los jobs se acumulan en Redis y nada se carga. El `.env` de `ckan-docker/` necesita `CKAN___API_TOKEN__JWT__DECODE__SECRET`: el worker decodifica el token que mintió el contenedor web, y sin ese secreto no arranca.
+- **Fechas dd/mm**: la base del DataStore usa `DateStyle 'ISO, DMY'` (lo fija `20_create_datastore.sh` en volúmenes nuevos y `04_datastore_datestyle.sh` en cada arranque de `ckan` en los existentes), y xloader corre con `parse_dates_dayfirst`. Así `03/04/2024` es el 3 de abril por las dos vías de carga de xloader. Una fecha ISO (`2024-04-03`) no cambia.
+- **Tipos**: xloader carga todas las columnas como texto. Los tipos se declaran en el Diccionario de Datos del recurso y se recarga. Una columna con zona horaria (`10:30:00-04:00`) va como `timestamptz`. Como `timestamp` se pierde el offset.
+
+Pendiente, sin resolver: si un cambio de tipo falla, la tabla puede quedar a medias o borrarse (medido en `odd/tasks/loader-eval.md`).
+
+**Stack dev existente:** reconstruir la imagen no alcanza. Los volúmenes `home_dir` (`/srv/app`), `site_packages_py314` y `local_bin` de `docker-compose.dev.yml` tapan lo que pip instala en la imagen, así que xloader no aparece hasta recrearlos. Los datos (`pg_data`, `ckan_storage`, `solr_data`) no se tocan:
+
+```sh
+docker compose -f docker-compose.dev.unified.yml down
+docker volume rm odp-dev_home_dir odp-dev_site_packages_py314 odp-dev_local_bin
+docker compose -f docker-compose.dev.unified.yml up -d --build
+```
+
+El `.env` local de `ckan-docker/` también cambia: en `CKAN__PLUGINS`, `datapusher` se reemplaza por `xloader`, y las variables `DATAPUSHER_*` y `CKAN__DATAPUSHER__*` se borran (ver `ckan-docker/.env.example`).
 
 ## Conectividad
 

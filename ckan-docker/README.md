@@ -401,8 +401,11 @@ command: `python -m pdb /usr/lib/ckan/venv/bin/ckan --config /srv/app/ckan.ini r
 
 ## 7. Datastore and datapusher
 
-The Datastore database and user is created as part of the entrypoint scripts for the db container. There is also a Datapusher container
-running the latest version of Datapusher.
+The Datastore database and user is created as part of the entrypoint scripts for the db container.
+
+> **This repository does not run DataPusher.** It loads the DataStore with ckanext-xloader 2.6.0, installed in
+> `Dockerfile.umss` / `Dockerfile.dev.umss`, plus a `ckan-worker` service running `ckan jobs worker`. The
+> DataStore database uses `DateStyle 'ISO, DMY'`. See "Carga al DataStore (xloader)" in the root `README.md`.
 
 ## 8. NGINX
 
@@ -461,6 +464,9 @@ The base image used in the CKAN Dockerfile and Dockerfile.dev can be changed so 
 ## 13. Replacing DataPusher with XLoader
 
 Check out the wiki page for this: https://github.com/ckan/ckan-docker/wiki/Replacing-DataPusher-with-XLoader
+
+This repository already made the switch differently from that page: xloader is installed in the CKAN image and the
+jobs run in a separate `ckan-worker` service (see section 7).
 
 Copying and License
 -------------------

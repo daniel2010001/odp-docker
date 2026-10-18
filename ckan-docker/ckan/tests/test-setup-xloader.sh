@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
+# Tests for `docker-entrypoint.d/01_setup_xloader.sh`.
 #
-# Tests for `docker-entrypoint.d/01_setup_datapusher.sh`.
-#
-# Run from anywhere:  bash ckan-docker/ckan/tests/test-setup-datapusher.sh
+# Run from anywhere:  bash ckan-docker/ckan/tests/test-setup-xloader.sh
 #
 # These tests SOURCE the script instead of executing it, because the container
 # does exactly that: `/srv/app/start_ckan_development.sh` runs every file in
@@ -11,15 +10,12 @@
 #
 #   1. A failed mint must not take PID 1 down. Only an explicit `exit` inside a
 #      sourced script can do that, so the guard has to `return`.
-#   2. A failed mint must not leave an unusable token behind. CKAN's DataPusher
-#      plugin raises on an empty `ckan.datapusher.api_token`
-#      (`ckanext/datapusher/plugin.py:52`), so an empty capture is a crash loop. The
-#      base entrypoint writes the placeholder `ckan.datapusher.api_token=xxx`
-#      before this file runs (`/srv/app/start_ckan_development.sh:6`), so refusing
-#      to write leaves that placeholder: CKAN starts and the datapusher stays
-#      broken (403, resources stuck in `pending`) rather than the stack refusing to
-#      boot. That trade is deliberate -- `restart: unless-stopped` turns any crash
-#      into a loop.
+#   2. A failed mint must not leave an unusable token behind. Nothing is written
+#      on a refused mint, so the ini keeps whatever it had: CKAN starts, and
+#      `xloader_submit` answers a ValidationError because
+#      `ckanext.xloader.api_token` is still `NOT_SET` (`utils.py:163`), instead
+#      of the stack refusing to boot. That trade is deliberate --
+#      `restart: unless-stopped` turns any crash into a loop.
 #
 # This file must NOT live in `docker-entrypoint.d/`: `Dockerfile.dev` COPYs that
 # whole directory into the image and the entrypoint sources every `*.sh` in it,
@@ -29,13 +25,13 @@
 # the sourced script is written for a shell that does not abort on errors.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT="${HERE}/../docker-entrypoint.d/01_setup_datapusher.sh"
+SCRIPT="${HERE}/../docker-entrypoint.d/01_setup_xloader.sh"
 
 # Shaped like the real token: three base64url segments. Not a real JWT, and it
 # does not need to be -- nothing here verifies a signature.
 VALID_TOKEN="eyJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJhYmMifQ.c2lnbmF0dXJl"
-# What the base entrypoint writes before this file is sourced: a placeholder, not
-# a working token. The guard must leave exactly this behind, untouched.
+# Whatever the ini already had before this file is sourced. The guard must leave
+# exactly this behind, untouched, when it refuses to write.
 PREVIOUS_TOKEN="xxx"
 # The real text CKAN printed on stdout when `api_token_create` rejected the call
 # for a missing `expires_in`: the old command substitution captured THIS, and it
@@ -53,7 +49,7 @@ cat > "$BIN/ckan" <<'STUB'
 #!/usr/bin/env bash
 # `ckan -c <ini> user token add <user> <name> ...` prints the minted token.
 if [ "${1:-}" = "-c" ]; then
-	printf 'mint\n' >> "${STUB_LOG:-/dev/null}"
+	printf 'mint %s\n' "$*" >> "${STUB_LOG:-/dev/null}"
 	printf '%s\n' "${STUB_TOKEN:-}"
 	exit 0
 fi
@@ -107,10 +103,10 @@ run_guard() {
 # variable, MINT_OUTPUT for what the fake CLI prints, PLUGINS for the plugin set.
 setup() {
 	INI="$WORK/ckan.ini"
-	printf 'ckan.datapusher.api_token=%s\n' "$PREVIOUS_TOKEN" > "$INI"
+	printf 'ckanext.xloader.api_token=%s\n' "$PREVIOUS_TOKEN" > "$INI"
 	export CKAN_INI="$INI"
-	export CKAN__PLUGINS="${PLUGINS-datapusher}"
-	export CKAN__DATAPUSHER__API_TOKEN="${PROVIDED-}"
+	export CKAN__PLUGINS="${PLUGINS-xloader}"
+	export CKANEXT__XLOADER__API_TOKEN="${PROVIDED-}"
 	export STUB_TOKEN="${MINT_OUTPUT-}"
 	export STUB_LOG="$WORK/mint.log"
 	export PATH="$BIN:$BASE_PATH"
@@ -130,8 +126,10 @@ out="$(run_guard 2>&1)"
 assert_contains "the shell survives the script" "$out" "__SURVIVED__:"
 assert_eq "the guard reports success" "0" "$(marker_status "$out")"
 assert_contains "the mint ran" "$(cat "$STUB_LOG")" "mint"
+assert_contains "the token is minted for the default sysadmin, named xloader" \
+	"$(cat "$STUB_LOG")" "user token add ckan_admin xloader expires_in=365 unit=86400 -q"
 assert_eq "the ini carries the minted token" \
-	"ckan.datapusher.api_token=$VALID_TOKEN" "$(cat "$CKAN_INI")"
+	"ckanext.xloader.api_token=$VALID_TOKEN" "$(cat "$CKAN_INI")"
 
 echo "a mint that produced nothing leaves the ini untouched"
 PROVIDED= MINT_OUTPUT= setup
@@ -159,7 +157,7 @@ assert_contains "the shell survives the script" "$out" "__SURVIVED__:"
 assert_eq "the mint was not called" "" "$(cat "$STUB_LOG")"
 assert_eq "the ini is untouched" "$before" "$(cat "$CKAN_INI")"
 
-echo "a plugin set without datapusher does nothing"
+echo "a plugin set without xloader does nothing"
 PROVIDED= MINT_OUTPUT="$VALID_TOKEN" PLUGINS="stats activity" setup
 before="$(cat "$CKAN_INI")"
 out="$(run_guard 2>&1)"
