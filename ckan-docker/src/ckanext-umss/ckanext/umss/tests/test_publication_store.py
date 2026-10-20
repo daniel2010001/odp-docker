@@ -53,7 +53,16 @@ DECLARED_COLUMNS = (
     "created_at",
     "decided_at",
     "consumed_at",
+    # Migration 0002, the request history: the requester's and the decider's
+    # comments kept apart, and who resolved the request whatever the outcome.
+    "request_comment",
+    "decision_comment",
+    "resolved_by",
 )
+
+# The columns 0002 adds. Nullable, because every row written before 0002 lacks
+# them and a pending row has no resolver.
+HISTORY_COLUMNS = ("request_comment", "decision_comment", "resolved_by")
 
 # The columns D2 declares as mandatory — the ones the migration writes with
 # `nullable=False`. `id` is the primary key and carries a default instead, so it
@@ -135,6 +144,9 @@ def test_a_row_persists_every_declared_column(store):
             created_at=created,
             decided_at=decided,
             consumed_at=consumed,
+            request_comment="please publish",
+            decision_comment="looks good",
+            resolved_by="approver-1",
         )
     )
 
@@ -151,6 +163,9 @@ def test_a_row_persists_every_declared_column(store):
     assert row.created_at == created
     assert row.decided_at == decided
     assert row.consumed_at == consumed
+    assert row.request_comment == "please publish"
+    assert row.decision_comment == "looks good"
+    assert row.resolved_by == "approver-1"
 
 
 def test_a_pending_row_persists_with_only_the_mandatory_fields(store):
@@ -328,3 +343,117 @@ def test_the_migration_can_be_reversed(store, migrate_db_for):
     # migrations only.
     migrate_db_for("umss")
     assert sa.inspect(ckan_model.Session.bind).has_table("publication_requests")
+
+
+# ---------------------------------------------------------------------------
+# 0002 — the request history columns, and what it backfills
+# ---------------------------------------------------------------------------
+
+
+def raw_rows():
+    """Every row as the database holds it, keyed by id, read with raw SQL.
+
+    The read's transaction is closed before returning: a migration runs on its
+    own connection, and its `ALTER TABLE` waits forever behind a session left
+    idle in a transaction that read the table (measured: the suite hung).
+    """
+    result = ckan_model.Session.execute(sa.text("select * from publication_requests"))
+    rows = {row["id"]: dict(row) for row in result.mappings()}
+    ckan_model.Session.rollback()
+    return rows
+
+
+def test_the_history_columns_are_nullable(store):
+    columns = {
+        column["name"]: column
+        for column in sa.inspect(ckan_model.Session.bind).get_columns(
+            "publication_requests"
+        )
+    }
+    for name in HISTORY_COLUMNS:
+        assert columns[name]["nullable"] is True, name
+
+
+def at_0001_with_rows(migrate_db_for, rows):
+    """The table as 0001 left it, holding `rows` (raw inserts), then 0002."""
+    migrate_db_for("umss", "0001", forward=False)
+    assert "resolved_by" not in {
+        column["name"]
+        for column in sa.inspect(ckan_model.Session.bind).get_columns(
+            "publication_requests"
+        )
+    }
+    for row in rows:
+        insert_raw(**row)
+    ckan_model.Session.commit()
+    migrate_db_for("umss")
+    return raw_rows()
+
+
+# One row per outcome, as 0001 could have stored it. Each status says what its
+# single `comments` held: no decision ran on pending/cancelled/annulled rows, a
+# rejection always carries the decider's comment, and an approval keeps the
+# requester's note unless the decider wrote one — so it cannot be attributed.
+BEFORE_0002 = {
+    "p": {"status": "pending", "comments": "asked"},
+    "c": {"status": "cancelled", "comments": "asked"},
+    "n": {
+        "status": "annulled",
+        "comments": "asked",
+        "motive": "dataset_deleted",
+        "dataset_id": "dataset-n",
+    },
+    "r": {
+        "status": "rejected",
+        "comments": "decided",
+        "approved_by": "approver-1",
+        "dataset_id": "dataset-r",
+    },
+    "a": {
+        "status": "approved",
+        "comments": "either",
+        "approved_by": "approver-1",
+        "dataset_id": "dataset-a",
+    },
+}
+
+
+def test_0002_backfills_only_what_the_old_row_can_attribute(store, migrate_db_for):
+    rows = at_0001_with_rows(
+        migrate_db_for,
+        [dict(values, id=key) for key, values in BEFORE_0002.items()],
+    )
+
+    def history(key):
+        row = rows[key]
+        return (row["request_comment"], row["decision_comment"], row["resolved_by"])
+
+    assert history("p") == ("asked", None, None)
+    assert history("c") == ("asked", None, None)
+    assert history("n") == ("asked", None, None)
+    assert history("r") == (None, "decided", "approver-1")
+    assert history("a") == (None, None, "approver-1")
+    # `comments` and every other column are left exactly as they were.
+    for key, values in BEFORE_0002.items():
+        for column, value in values.items():
+            assert rows[key][column] == value, (key, column)
+
+
+def test_0002_backfills_nothing_into_a_row_without_comments(store, migrate_db_for):
+    rows = at_0001_with_rows(migrate_db_for, [{"id": "bare", "status": "pending"}])
+
+    assert rows["bare"]["request_comment"] is None
+    assert rows["bare"]["comments"] is None
+
+
+def test_0002_can_be_reversed_and_keeps_the_rows(store, migrate_db_for):
+    save(make_request(comments="kept", request_comment="kept", resolved_by="x"))
+
+    migrate_db_for("umss", "0001", forward=False)
+    after = list(raw_rows().values())
+    assert len(after) == 1
+    assert after[0]["comments"] == "kept"
+    assert not set(HISTORY_COLUMNS) & set(after[0])
+
+    migrate_db_for("umss")
+    assert set(HISTORY_COLUMNS) <= set(next(iter(raw_rows().values())))

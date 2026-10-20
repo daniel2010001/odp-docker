@@ -1609,15 +1609,16 @@ def test_every_action_returns_rows_carrying_both_presentation_names(scene, store
         assert_names_present(row)
 
 
-def test_the_row_dict_is_additive_over_the_eleven_table_columns(scene, store):
-    """The change adds exactly the additive keys: the eleven table columns stay,
+def test_the_row_dict_is_additive_over_the_table_columns(scene, store):
+    """The change adds exactly the additive keys: the fourteen table columns
+    (0001's eleven and 0002's three) stay,
     and no other key appears. A consumer is allowed to branch on the shape, so a
     face that grew a key its siblings do not carry is a contract change, and this
     is where it gets noticed."""
     created = request_for(scene["editor"], scene["dataset"]["id"])
 
     columns = {column.name for column in umss_model.PublicationRequest.__table__.columns}
-    assert len(columns) == 11
+    assert len(columns) == 14
     assert set(created) == (
         columns | set(NAME_KEYS) | set(TITLE_KEYS) | set(DECISION_KEYS)
     )

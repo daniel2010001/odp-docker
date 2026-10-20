@@ -10,7 +10,8 @@ per dataset**, while a dataset keeps any number of settled rows. The index is
 partial on purpose — a plain unique index on `dataset_id` would forbid the
 second request a dataset will legitimately need after the first one is decided.
 
-The table is created by `migration/umss/versions/0001_add_publication_requests.py`,
+The table is created by `migration/umss/versions/0001_add_publication_requests.py`
+and extended by `0002_add_publication_request_history.py`,
 in tests as well as in production. CKAN's harness does not build an extension's
 table from model metadata: `clean_db` reaches `rebuild_db`, whose `init_db`
 replays the *core* migrations only, and `delete_all` explicitly tolerates a
@@ -92,6 +93,12 @@ class PublicationRequest(domain_object.DomainObject, BaseModel):
         ),
         sa.Column("decided_at", sa.DateTime),
         sa.Column("consumed_at", sa.DateTime),
+        # Migration 0002, the request history. `comments` stays what it always
+        # was; these keep the requester's note and the decider's comment apart,
+        # and record who took the row out of `pending` whatever the outcome.
+        sa.Column("request_comment", sa.UnicodeText),
+        sa.Column("decision_comment", sa.UnicodeText),
+        sa.Column("resolved_by", sa.UnicodeText),
         # The two declared domains, enforced by the database and not only by the
         # actions: a status or a visibility outside its set is a bug that should
         # fail loudly where the row is written. A1's review marked the absence of

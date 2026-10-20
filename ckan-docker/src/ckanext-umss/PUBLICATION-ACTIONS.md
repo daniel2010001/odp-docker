@@ -205,6 +205,25 @@ The bypasses that remain are named individually under *Named bypasses* below.
     requested several datasets in one organization, once per requester for a page
     of N different requesters. It cannot be batched without re-writing the stock
     hierarchy walk the predicate deliberately reuses.
+11. **The row carries its history** (migration `0002`, 2026-10-20), so a dataset page can show each
+    request with when it was made, when it was resolved, by whom and why. Three nullable columns,
+    additive — **`comments` keeps its meaning for every existing consumer**:
+
+    | Column | Holds |
+    |---|---|
+    | `request_comment` | the requester's note |
+    | `decision_comment` | the decider's comment |
+    | `resolved_by` | the user id that took the row out of `pending`, whatever the outcome |
+
+    **Rows written before `0002` are backfilled only where the old row can attribute the value.** No
+    decision ran on a `pending`, `cancelled` or `annulled` row, so its `comments` becomes its
+    `request_comment`. A rejection always carries the decider's comment, so a `rejected` row's
+    `comments` becomes its `decision_comment`. An `approved` row's `comments` may be either (an approval
+    without a comment kept the requester's note), so it is **not** copied: both new comment columns
+    stay `null` and `comments` still holds it. `resolved_by` is `approved_by` on `approved` and
+    `rejected` rows; who cancelled or annulled an old row was never stored and stays `null`. Pinned by
+    `test_0002_backfills_only_what_the_old_row_can_attribute`. `0002` is reversible: its downgrade
+    drops the three columns, and `comments` and `approved_by` still hold everything `0001` knew.
 
 ### Two publish-denial messages, two rules
 
