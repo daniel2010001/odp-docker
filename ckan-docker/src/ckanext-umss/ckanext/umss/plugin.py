@@ -8,6 +8,7 @@ import sqlalchemy as sa
 from ckanext.umss import auth
 from ckanext.umss import charts
 from ckanext.umss import model as umss_model
+from ckanext.umss.logic import caller_id
 from ckanext.umss.logic.action import chart as chart_actions
 from ckanext.umss.logic.action import publication as publication_actions
 from ckanext.umss.logic.action import xloader as xloader_actions
@@ -172,4 +173,7 @@ class UmssPlugin(plugins.SingletonPlugin):
         row.status = umss_model.ANNULLED
         row.motive = umss_model.MOTIVE_DATASET_DELETED
         row.decided_at = datetime.datetime.now()
+        # Who deleted the dataset resolved the request (0002). Not a decision:
+        # `approved_by` stays unset.
+        row.resolved_by = caller_id(context)
 

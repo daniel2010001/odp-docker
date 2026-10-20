@@ -418,6 +418,12 @@ BEFORE_0002 = {
 }
 
 
+def test_the_backfill_table_covers_every_declared_status():
+    assert {values["status"] for values in BEFORE_0002.values()} == set(
+        umss_model.STATUSES
+    )
+
+
 def test_0002_backfills_only_what_the_old_row_can_attribute(store, migrate_db_for):
     rows = at_0001_with_rows(
         migrate_db_for,

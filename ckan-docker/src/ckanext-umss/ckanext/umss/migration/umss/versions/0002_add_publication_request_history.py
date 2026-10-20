@@ -21,8 +21,9 @@ that, additively — `comments` keeps its meaning for every existing consumer:
 
 The backfill writes only what a 0001 row can attribute. No decision ran on a
 `pending`, `cancelled` or `annulled` row, so its `comments` is the requester's.
-A rejection always carries the decider's comment, so a `rejected` row's
-`comments` is the decider's. An `approved` row's `comments` is either (an
+A rejection carries the decider's comment (required since 2026-10-07,
+b98d823), so a `rejected` row's `comments` is the decider's; one made on
+2026-10-06 without a comment would be misfiled, and no store measured holds one. An `approved` row's `comments` is either (an
 approval without a comment keeps the requester's note), so it is not copied.
 `approved_by` is the decider of both decided outcomes. Who cancelled or
 annulled an old row was never stored, and stays unknown.
