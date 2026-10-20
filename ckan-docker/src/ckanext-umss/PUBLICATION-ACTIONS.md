@@ -68,7 +68,7 @@ The bypasses that remain are named individually under *Named bypasses* below.
 | `publication_request_create` | `dataset_id` (an id **or** a name), `comments?` | the row — `dataset_id` as stored, see rule 9 | a caller who can `update_dataset` in the owning org, on a **private** dataset. Idempotent: answers the existing `pending` row |
 | `publication_request_cancel` | `request_id` | the row | the requester, or an org `admin` |
 | `publication_request_decide` | `request_id`, `approve` (bool), `comments?` | the row | an `admin` of the owning org, an `admin` of a **parent** org, or a `sysadmin`. The requester **cannot decide their own request while another person of the owning organization could**; since 2026-10-15 (rule 5, the `c′` exception) a requester who is that organization's **only** approver **may** decide it, which is what unblocks a single-person organization. A `sysadmin` is never that "other person" |
-| `publication_request_list` | `status?` | a list of rows | **any caller may invoke it**: the auth function returns `success: True` unconditionally, and the **action body** narrows the result to what the caller may see (`_datasets_by_id` resolves every dataset's owner org and both titles in one query, the `update_dataset` capacity is evaluated once per organisation, plus the caller's own rows). An anonymous caller is **not** refused before the auth function runs (the same mechanism as rule 7): measured, an anonymous call reached the body and returned a `500` because the dev database has no store table, not a `403` |
+| `publication_request_list` | `status?`, `dataset_id?` (an id **or** a name), `sort?` (`"created_at asc"`, the default, or `"created_at desc"`) | a list of rows; with `dataset_id`, that dataset's history (rule 11) | **any caller may invoke it**: the auth function returns `success: True` unconditionally, and the **action body** narrows the result to what the caller may see (`_datasets_by_id` resolves every dataset's owner org and both titles in one query, the `update_dataset` capacity is evaluated once per organisation, plus the caller's own rows). An anonymous caller is **not** refused before the auth function runs (the same mechanism as rule 7): measured, an anonymous call reached the body and returned a `500` because the dev database has no store table, not a `403` |
 
 ## The rules that are not visible in the names
 
@@ -78,15 +78,16 @@ The bypasses that remain are named individually under *Named bypasses* below.
    **re-reads it** — that verifies the effect at the source instead of trusting the response of the
    action that wrote it. Decided in favour of the uniform shape over an additive `dataset` key, and it
    is final: **the shape does not change after a consumer is wired.**
-2. **`requested_by` and `approved_by` are user _ids_**, CKAN's convention (`package_show` answers
+2. **`requested_by`, `approved_by` and `resolved_by` are user _ids_**, CKAN's convention (`package_show` answers
    `creator_user_id`). Comparing them against a username is a silently dead check: it has already
    happened once, on the consuming side, and left a four-eyes rule implemented, green and inert.
 3. **Rows carry presentation names** so the queue does not resolve N users per page:
-   `requested_by_name` and `approved_by_name` (CKAN usernames), resolved **in one batched query per
-   call**. The two empties are distinct: an **unset** id column answers `None`, and an id that **is set
+   `requested_by_name`, `approved_by_name` and `resolved_by_name` (CKAN usernames), resolved **in one
+   batched query per call**. The two empties are distinct: an **unset** id column answers `None`, and an id that **is set
    but does not resolve** answers the neutral token `"unknown"` — **never the raw id** (a field called
    `..._name` must never contain an id). `approved_by_name` is only meaningful on `approved` and
-   `rejected`; on `cancelled` the requester withdrew and on `annulled` there was no decision.
+   `rejected`; on `cancelled` the request was withdrawn and on `annulled` there was no decision. Who
+   withdrew it, or deleted the dataset, is `resolved_by_name` (rule 11).
 
    **The queue also carries the dataset's and the organisation's titles**, so the portal can name the
    dataset without an N-per-row `package_show`: `dataset_title` and `organization_title`. They are the
@@ -205,6 +206,49 @@ The bypasses that remain are named individually under *Named bypasses* below.
     requested several datasets in one organization, once per requester for a page
     of N different requesters. It cannot be batched without re-writing the stock
     hierarchy walk the predicate deliberately reuses.
+11. **The row carries its history** (migration `0002`, 2026-10-20), so a dataset page can show each
+    request with when it was made, when it was resolved, by whom and why. Three nullable columns,
+    additive — **`comments` keeps its meaning for every existing consumer**:
+
+    | Column | Holds |
+    |---|---|
+    | `request_comment` | the requester's note |
+    | `decision_comment` | the decider's comment |
+    | `resolved_by` | the user id that took the row out of `pending`, whatever the outcome |
+
+    **Rows written before `0002` are backfilled only where the old row can attribute the value.** No
+    decision ran on a `pending`, `cancelled` or `annulled` row, so its `comments` becomes its
+    `request_comment`. A rejection carries the decider's comment (required since 2026-10-07,
+    `b98d823`), so a `rejected` row's `comments` becomes its `decision_comment`; a rejection made on
+    2026-10-06 without a comment would be misfiled that way, and no store measured holds one (dev has
+    no `rejected` row, the demo was created on 2026-10-18). An `approved` row's `comments` may be either (an approval
+    without a comment kept the requester's note), so it is **not** copied: both new comment columns
+    stay `null` and `comments` still holds it. `resolved_by` is `approved_by` on `approved` and
+    `rejected` rows; who cancelled or annulled an old row was never stored and stays `null`. Pinned by
+    `test_0002_backfills_only_what_the_old_row_can_attribute`. `0002` is reversible: its downgrade
+    drops the three columns, and `comments` and `approved_by` still hold everything `0001` knew.
+
+    **Who writes what.** Every face answers the three columns and `resolved_by_name` (rule 3's
+    `null`/`"unknown"` semantics):
+
+    | Action | `request_comment` | `decision_comment` | `resolved_by` | `decided_at` |
+    |---|---|---|---|---|
+    | `create` | its `comments` | — | — | — |
+    | `decide` | kept | its `comments`, when given | the decider (= `approved_by`) | now |
+    | `cancel` | kept | — | the caller: the requester or an org `admin` | now |
+    | annulment (`package_delete`) | kept | — | the caller of `package_delete` | now |
+
+    `comments` is written exactly as before `0002` (`create` sets it, a `decide` with a comment
+    replaces it), so a consumer that reads it sees no change. A cancellation and an annulment are not
+    decisions: `approved_by` stays `null` on both.
+
+    **The history of one dataset** is `publication_request_list {dataset_id, sort: "created_at desc"}`:
+    every status, newest first. `dataset_id` takes an id or a name and matches rows stored under
+    either form (rule 9); one that does not resolve answers `NotFound` (rule 7), which reveals no more
+    than `package_show`'s own `404`/`403` split. It narrows the query and does not widen it: the caller
+    sees the same rows the unfiltered list shows them for that dataset (rule 8). `sort` is a closed
+    set; any other value answers `409` with `{"sort": ['Must be "created_at asc" or "created_at
+    desc"']}`.
 
 ### Two publish-denial messages, two rules
 

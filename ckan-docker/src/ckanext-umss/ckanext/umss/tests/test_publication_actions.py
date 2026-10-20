@@ -1513,7 +1513,7 @@ def test_deleting_a_dataset_without_the_store_table_is_a_clean_no_op(scene):
 # ---------------------------------------------------------------------------
 
 
-NAME_KEYS = ("requested_by_name", "approved_by_name")
+NAME_KEYS = ("requested_by_name", "approved_by_name", "resolved_by_name")
 TITLE_KEYS = ("dataset_title", "organization_title")
 
 # S4's computed key. It is not a stored column and not a name: it is the decide
@@ -1609,15 +1609,16 @@ def test_every_action_returns_rows_carrying_both_presentation_names(scene, store
         assert_names_present(row)
 
 
-def test_the_row_dict_is_additive_over_the_eleven_table_columns(scene, store):
-    """The change adds exactly the additive keys: the eleven table columns stay,
+def test_the_row_dict_is_additive_over_the_table_columns(scene, store):
+    """The change adds exactly the additive keys: the fourteen table columns
+    (0001's eleven and 0002's three) stay,
     and no other key appears. A consumer is allowed to branch on the shape, so a
     face that grew a key its siblings do not carry is a contract change, and this
     is where it gets noticed."""
     created = request_for(scene["editor"], scene["dataset"]["id"])
 
     columns = {column.name for column in umss_model.PublicationRequest.__table__.columns}
-    assert len(columns) == 11
+    assert len(columns) == 14
     assert set(created) == (
         columns | set(NAME_KEYS) | set(TITLE_KEYS) | set(DECISION_KEYS)
     )
@@ -2217,3 +2218,310 @@ def test_an_active_dataset_is_published_exactly_as_before(scene, store):
     assert call_as(None, "package_show", id=scene["dataset"]["id"])["private"] is False
 
 
+
+
+# ---------------------------------------------------------------------------
+# 0002 — each request carries its history: both comments, who resolved it, when
+# ---------------------------------------------------------------------------
+
+
+def test_create_keeps_the_note_in_request_comment_and_in_comments(scene, store):
+    created = call_as(
+        scene["editor"],
+        "publication_request_create",
+        dataset_id=scene["dataset"]["id"],
+        comments="please publish",
+    )
+
+    assert created["request_comment"] == "please publish"
+    assert created["comments"] == "please publish"
+    assert created["decision_comment"] is None
+    assert created["resolved_by"] is None
+    assert created["resolved_by_name"] is None
+    assert created["decided_at"] is None
+    row = the_row(scene["dataset"]["id"])
+    assert (row.request_comment, row.comments) == ("please publish", "please publish")
+
+
+def test_a_rejection_keeps_both_comments_apart(scene, store):
+    created = call_as(
+        scene["editor"],
+        "publication_request_create",
+        dataset_id=scene["dataset"]["id"],
+        comments="please publish",
+    )
+
+    rejected = call_as(
+        scene["admin"],
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=False,
+        comments="missing licence",
+    )
+
+    assert rejected["request_comment"] == "please publish"
+    assert rejected["decision_comment"] == "missing licence"
+    # `comments` behaves exactly as before 0002: the decider's comment wins.
+    assert rejected["comments"] == "missing licence"
+    assert rejected["resolved_by"] == scene["admin"]["id"]
+    assert rejected["resolved_by_name"] == scene["admin"]["name"]
+    assert rejected["approved_by"] == scene["admin"]["id"]
+    assert rejected["decided_at"] is not None
+
+
+def test_an_approval_without_a_comment_records_no_decision_comment(scene, store):
+    created = call_as(
+        scene["editor"],
+        "publication_request_create",
+        dataset_id=scene["dataset"]["id"],
+        comments="please publish",
+    )
+
+    approved = call_as(
+        scene["admin"],
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert approved["request_comment"] == "please publish"
+    assert approved["decision_comment"] is None
+    assert approved["comments"] == "please publish"
+    assert approved["resolved_by"] == scene["admin"]["id"]
+    assert approved["resolved_by_name"] == scene["admin"]["name"]
+
+
+def test_an_approval_with_a_comment_records_it_as_the_decision_comment(scene, store):
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    approved = call_as(
+        scene["admin"],
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+        comments="ok",
+    )
+
+    assert approved["request_comment"] is None
+    assert approved["decision_comment"] == "ok"
+    assert approved["comments"] == "ok"
+
+
+@pytest.mark.parametrize("canceller", ["editor", "admin"])
+def test_cancel_records_when_and_by_whom(scene, store, canceller):
+    created = call_as(
+        scene["editor"],
+        "publication_request_create",
+        dataset_id=scene["dataset"]["id"],
+        comments="please publish",
+    )
+    before = datetime.datetime.now()
+
+    cancelled = call_as(
+        scene[canceller], "publication_request_cancel", request_id=created["id"]
+    )
+
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["resolved_by"] == scene[canceller]["id"]
+    assert cancelled["resolved_by_name"] == scene[canceller]["name"]
+    assert cancelled["decided_at"] is not None
+    assert cancelled["decided_at"] >= before
+    # A cancellation is not a decision: nobody approved, nothing was said.
+    assert cancelled["approved_by"] is None
+    assert cancelled["approved_by_name"] is None
+    assert cancelled["decision_comment"] is None
+    assert cancelled["request_comment"] == "please publish"
+    row = the_row(scene["dataset"]["id"])
+    assert row.resolved_by == scene[canceller]["id"]
+    assert row.decided_at == cancelled["decided_at"]
+    assert stored(scene["dataset"]["id"])["private"] is True
+
+
+def test_a_refused_cancel_records_nothing(scene, store):
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    refused(scene["outsider"], "publication_request_cancel", request_id=created["id"])
+
+    row = the_row(scene["dataset"]["id"])
+    assert (row.status, row.resolved_by, row.decided_at) == ("pending", None, None)
+
+
+def test_annulling_records_who_deleted_the_dataset(scene, store):
+    request_for(scene["editor"], scene["dataset"]["id"])
+
+    call_as(scene["admin"], "package_delete", id=scene["dataset"]["id"])
+
+    row = the_row(scene["dataset"]["id"])
+    assert row.status == umss_model.ANNULLED
+    assert row.motive == umss_model.MOTIVE_DATASET_DELETED
+    assert row.decided_at is not None
+    assert row.resolved_by == scene["admin"]["id"]
+    assert row.approved_by is None
+
+
+def test_resolved_by_name_answers_unknown_for_an_unresolvable_id(scene, store):
+    ghost = "00000000-0000-0000-0000-000000000000"
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+    call_as(scene["editor"], "publication_request_cancel", request_id=created["id"])
+    row = the_row(scene["dataset"]["id"])
+    row.resolved_by = ghost
+    ckan_model.Session.commit()
+
+    listed = call_as(scene["admin"], "publication_request_list", status="cancelled")
+
+    assert [r["resolved_by"] for r in listed] == [ghost]
+    assert [r["resolved_by_name"] for r in listed] == ["unknown"]
+
+
+def test_a_single_row_return_resolves_all_three_ids_in_one_query(scene, store):
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    cancelled, statements = measured(
+        lambda: call_as(
+            scene["admin"], "publication_request_cancel", request_id=created["id"]
+        )
+    )
+
+    assert cancelled["requested_by_name"] == scene["editor"]["name"]
+    assert cancelled["resolved_by_name"] == scene["admin"]["name"]
+    assert len(name_resolution_selects(statements)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 0002 — the history of one dataset: `dataset_id` and `sort` on the list
+# ---------------------------------------------------------------------------
+
+
+def history_of(scene, dataset_key="dataset"):
+    """Three settled requests and a pending one for one dataset, created in a
+    known order, plus a pending request for another dataset of the same org."""
+    dataset_id = scene[dataset_key]["id"]
+    ids = []
+    for settle in ("cancel", "reject", "cancel", None):
+        created = request_for(scene["editor"], dataset_id)
+        ids.append(created["id"])
+        if settle == "cancel":
+            call_as(scene["editor"], "publication_request_cancel", request_id=created["id"])
+        elif settle == "reject":
+            call_as(
+                scene["admin"],
+                "publication_request_decide",
+                request_id=created["id"],
+                approve=False,
+                comments="no",
+            )
+    # Distinct, ordered creation times, so the order asserted is the stored one
+    # and not an accident of equal timestamps.
+    for minutes, request_id in enumerate(ids):
+        row = ckan_model.Session.get(umss_model.PublicationRequest, request_id)
+        row.created_at = datetime.datetime(2026, 10, 20, 12, minutes)
+    ckan_model.Session.commit()
+    other = request_for(scene["editor"], scene["second_dataset"]["id"])
+    return ids, other["id"]
+
+
+def test_list_by_dataset_answers_every_status_of_that_dataset_only(scene, store):
+    ids, other = history_of(scene)
+
+    listed = call_as(
+        scene["admin"], "publication_request_list", dataset_id=scene["dataset"]["id"]
+    )
+
+    assert [r["id"] for r in listed] == ids
+    assert [r["status"] for r in listed] == ["cancelled", "rejected", "cancelled", "pending"]
+    assert other not in [r["id"] for r in listed]
+
+
+def test_list_by_dataset_newest_first(scene, store):
+    ids, _ = history_of(scene)
+
+    listed = call_as(
+        scene["admin"],
+        "publication_request_list",
+        dataset_id=scene["dataset"]["id"],
+        sort="created_at desc",
+    )
+
+    assert [r["id"] for r in listed] == list(reversed(ids))
+
+
+def test_list_sort_ascending_is_the_default(scene, store):
+    ids, other = history_of(scene)
+
+    default = call_as(scene["admin"], "publication_request_list")
+    ascending = call_as(scene["admin"], "publication_request_list", sort="created_at asc")
+
+    assert [r["id"] for r in default] == [r["id"] for r in ascending]
+    assert [r["id"] for r in default] == ids + [other]
+
+
+def test_list_by_dataset_combines_with_status(scene, store):
+    ids, _ = history_of(scene)
+
+    listed = call_as(
+        scene["admin"],
+        "publication_request_list",
+        dataset_id=scene["dataset"]["id"],
+        status="cancelled",
+        sort="created_at desc",
+    )
+
+    assert [r["id"] for r in listed] == [ids[2], ids[0]]
+
+
+def test_list_by_dataset_accepts_the_name_and_finds_rows_stored_by_name(scene, store):
+    ids, _ = history_of(scene)
+    # A legacy row keyed by the name (rule 9) belongs to the same history.
+    legacy = umss_model.PublicationRequest(
+        dataset_id=scene["dataset"]["name"],
+        requested_visibility="public",
+        status=umss_model.CANCELLED,
+        requested_by=scene["editor"]["id"],
+        created_at=datetime.datetime(2026, 10, 20, 11, 0),
+    )
+    ckan_model.Session.add(legacy)
+    ckan_model.Session.commit()
+    legacy_id = legacy.id
+
+    by_name = call_as(
+        scene["admin"], "publication_request_list", dataset_id=scene["dataset"]["name"]
+    )
+    by_id = call_as(
+        scene["admin"], "publication_request_list", dataset_id=scene["dataset"]["id"]
+    )
+
+    assert [r["id"] for r in by_name] == [legacy_id] + ids
+    assert [r["id"] for r in by_id] == [legacy_id] + ids
+
+
+def test_list_by_dataset_keeps_the_visibility_rule(scene, store):
+    history_of(scene)
+
+    outsider = call_as(
+        scene["outsider"], "publication_request_list", dataset_id=scene["dataset"]["id"]
+    )
+    member = call_as(
+        scene["member"], "publication_request_list", dataset_id=scene["dataset"]["id"]
+    )
+    requester = call_as(
+        scene["editor"], "publication_request_list", dataset_id=scene["dataset"]["id"]
+    )
+
+    assert outsider == []
+    assert member == []
+    assert len(requester) == 4
+
+
+def test_list_by_an_unknown_dataset_is_not_found(scene, store):
+    with pytest.raises(toolkit.ObjectNotFound):
+        call_as(scene["admin"], "publication_request_list", dataset_id="no-such-dataset")
+
+
+@pytest.mark.parametrize("sort", ["created_at", "decided_at desc", "created_at DESC;", 1])
+def test_list_refuses_a_sort_outside_the_two_declared(scene, store, sort):
+    with pytest.raises(toolkit.ValidationError) as raised:
+        call_as(scene["admin"], "publication_request_list", sort=sort)
+
+    assert raised.value.error_dict == {
+        "sort": ['Must be "created_at asc" or "created_at desc"']
+    }

@@ -44,7 +44,7 @@ failure later in the same path (the trailing `_Session.commit()`,
 `_Session.expire_all()`, `_row_dict`) is **not separately measured**; it follows
 from the same already-landed commit, and no separate claim is made for it.
 
-`requested_by` and `approved_by` hold **user ids**, CKAN's convention
+`requested_by`, `approved_by` and `resolved_by` hold **user ids**, CKAN's convention
 (`package_show` answers `creator_user_id`).
 
 One key of the row is **computed for the caller** and is not a column:
@@ -121,7 +121,7 @@ def _names_for(user_ids):
     """Resolve a call's user ids to names in **one** query (rule 3).
 
     The queue must not resolve N users per page, so the caller collects every
-    `requested_by`/`approved_by` in the page and hands them here once; the
+    `requested_by`/`approved_by`/`resolved_by` in the page and hands them here once; the
     `IN` carries them all. Empty ids are dropped — the caller still decides the
     fallback for an id that is set but does not resolve.
     """
@@ -186,15 +186,21 @@ def _row_dict(row, context, names=None, datasets=None, cache=None):
     """
     data = {column.name: getattr(row, column.name) for column in row.__table__.columns}
     if names is None:
-        names = _names_for((row.requested_by, row.approved_by))
+        names = _names_for(_user_ids(row))
     if datasets is None:
         datasets = _datasets_by_id((row.dataset_id,))
     data["requested_by_name"] = _name_key(row.requested_by, names)
     data["approved_by_name"] = _name_key(row.approved_by, names)
+    data["resolved_by_name"] = _name_key(row.resolved_by, names)
     data["dataset_title"] = _dataset_title(row.dataset_id, datasets)
     data["organization_title"] = _organization_title(row.dataset_id, datasets)
     data[DECIDABLE_KEY] = _decidable_by_caller(row, context, cache)
     return data
+
+
+def _user_ids(row):
+    """The row's three user-id columns, the ones that answer a `..._name`."""
+    return (row.requested_by, row.approved_by, row.resolved_by)
 
 
 def _has_text(value):
@@ -347,6 +353,7 @@ def publication_request_create(context, data_dict):
         status=umss_model.PENDING,
         requested_by=caller_id(context),
         comments=data_dict.get("comments"),
+        request_comment=data_dict.get("comments"),
     )
     try:
         return _commit_row(row, context)
@@ -362,7 +369,12 @@ def publication_request_create(context, data_dict):
 
 
 def publication_request_cancel(context, data_dict):
-    """D4: `pending` → `cancelled`. Never flips the dataset."""
+    """D4: `pending` → `cancelled`. Never flips the dataset.
+
+    It records when and by whom (0002): `decided_at` and `resolved_by`, which
+    is the requester or an org `admin`. It is not a decision, so `approved_by`
+    and `decision_comment` stay unset.
+    """
     toolkit.check_access("publication_request_cancel", context, data_dict)
     row = _request_row(_required(data_dict, "request_id"))
 
@@ -372,6 +384,8 @@ def publication_request_cancel(context, data_dict):
         )
 
     row.status = umss_model.CANCELLED
+    row.resolved_by = caller_id(context)
+    row.decided_at = _now()
     return _commit_row(row, context)
 
 
@@ -395,9 +409,13 @@ def publication_request_decide(context, data_dict):
                 {"comments": ["Missing value: a rejection must carry a comment"]}
             )
 
+    # `comments` keeps its pre-0002 behaviour (the decider's comment replaces the
+    # requester's note); `decision_comment` keeps the decider's apart from it.
     if data_dict.get("comments"):
         row.comments = data_dict["comments"]
+        row.decision_comment = data_dict["comments"]
     row.approved_by = caller_id(context)
+    row.resolved_by = row.approved_by
     row.decided_at = _now()
 
     if not approve:
@@ -411,7 +429,14 @@ def publication_request_decide(context, data_dict):
 
 @toolkit.side_effect_free
 def publication_request_list(context, data_dict):
-    """D4's queue: what the caller may see, optionally narrowed by status.
+    """D4's queue: what the caller may see, optionally narrowed by status and
+    by one dataset, oldest first unless `sort` asks for the newest first.
+
+    `dataset_id` (0002) is the history of one dataset: an id **or** a name, like
+    `create`, resolved to the dataset (`NotFound` when it does not resolve), and
+    matched against **both** forms, because rows written before the
+    canonicalisation hold the name (rule 9). It narrows the query; it does not
+    widen what the caller may see, which is the same predicate as without it.
 
     "May see" is the stock `update_dataset` capacity on the dataset's org, plus
     the caller's own requests. The predicate stays in Python on purpose: the
@@ -436,11 +461,17 @@ def publication_request_list(context, data_dict):
     materialized, because D4's contract has no pagination. If the portal's queue
     needs paging, that is a contract change and it belongs to B2.
     """
+    order = _list_order(data_dict.get("sort"))
     query = _Session.query(umss_model.PublicationRequest)
     status = data_dict.get("status")
     if status:
         query = query.filter(umss_model.PublicationRequest.status == status)
-    rows = query.order_by(umss_model.PublicationRequest.created_at).all()
+    if data_dict.get("dataset_id"):
+        dataset = _existing_dataset(data_dict["dataset_id"])
+        query = query.filter(
+            umss_model.PublicationRequest.dataset_id.in_((dataset.id, dataset.name))
+        )
+    rows = query.order_by(order).all()
 
     caller = caller_id(context)
     datasets = _datasets_by_id(row.dataset_id for row in rows)
@@ -465,7 +496,7 @@ def publication_request_list(context, data_dict):
     names = _names_for(
         user_id
         for row in visible
-        for user_id in (row.requested_by, row.approved_by)
+        for user_id in _user_ids(row)
     )
     cache = decide_cache(
         meta["owner_org"] for meta in datasets.values() if meta["owner_org"]
@@ -473,6 +504,25 @@ def publication_request_list(context, data_dict):
     return [
         _row_dict(row, context, names, datasets, cache=cache) for row in visible
     ]
+
+
+# `publication_request_list`'s two orders (0002), by creation time. A closed
+# set, not a passthrough to SQL: anything else is a `ValidationError`.
+LIST_SORTS = {
+    "created_at asc": umss_model.PublicationRequest.created_at.asc(),
+    "created_at desc": umss_model.PublicationRequest.created_at.desc(),
+}
+DEFAULT_LIST_SORT = "created_at asc"
+
+
+def _list_order(sort):
+    if sort in (None, ""):
+        sort = DEFAULT_LIST_SORT
+    if not isinstance(sort, str) or sort not in LIST_SORTS:
+        raise toolkit.ValidationError(
+            {"sort": ['Must be "created_at asc" or "created_at desc"']}
+        )
+    return LIST_SORTS[sort]
 
 
 def _datasets_by_id(dataset_ids):
