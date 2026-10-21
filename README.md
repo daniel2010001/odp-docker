@@ -89,6 +89,8 @@ La demo v0 corre el stack de **producción** en hs-node (la laptop del homelab),
 
 En el primer arranque, sobre este stack se corren los chequeos del issue #25.
 
+**Conexiones entre el portal y CKAN.** El router http de uWSGI responde HTTP/1.1 sin `Connection: close` y cierra el socket; el servidor Node del portal lo deja en su pool y, si la siguiente petición sale antes del cierre, falla con `UND_ERR_SOCKET` y el portal responde 502 «No se pudo contactar el catálogo» (en la demo se vio como «no se pueden cargar los gráficos» que desaparecía al reintentar: 5 de 59 llamadas el 2026-10-21). El servicio `ckan` pasa ahora `EXTRA_UWSGI_OPTS="--add-header Connection:close"`: cada respuesta declara el cierre que uWSGI hace de todos modos, así que ningún cliente reutiliza el socket (cuesta una conexión TCP por petición en la red interna). No se eligió `--http-keepalive` porque reabre la carrera entre el cierre por inactividad de uWSGI y el pool de 4 s de undici, y eso no se midió. Medido con un uWSGI de prueba en la imagen de CKAN, con cuerpo JSON y con cuerpo en streaming; `tests/test-uwsgi-connection.sh` lo comprueba. Un contenedor `ckan` ya creado no toma el cambio: hay que recrearlo (`docker compose -f docker-compose.unified.yml -f docker-compose.hs.yml --env-file .env.demo up -d ckan`).
+
 ## Servicios
 
 | Servicio | Descripción |

@@ -50,6 +50,13 @@ services:
       - .env
     environment:
       <<: *xloader-env
+      # uWSGI's http router answers HTTP/1.1 without `Connection: close` and then closes the socket,
+      # so the portal's pooled connection dies under its next request (UND_ERR_SOCKET -> 502 "no se
+      # pueden cargar los graficos"). Every response now declares the close. Real keep-alive
+      # (`--http-keepalive`) was not chosen: it reopens the race through uWSGI's idle close vs the
+      # portal's 4 s pool. start_ckan.sh word-splits this value: no spaces inside the header value
+      # (tests/test-uwsgi-connection.sh).
+      EXTRA_UWSGI_OPTS: "--add-header Connection:close"
     depends_on:
       db:
         condition: service_healthy
