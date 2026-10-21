@@ -537,7 +537,7 @@ running CKAN 2.12.0 (`/srv/app/src/ckan`, `0058b2eb…`) or marked as **relayed*
    pequeño go». Adopted reading: only the organization's own admin approves. A `sysadmin` is refused with `Org admin decides` when that
    organization has an `active` non-sysadmin `admin` member (an unresolvable membership counts as one);
    an organization whose only admin is its sysadmin creator is still decided by a sysadmin.
-   **Escape hatch:** a sysadmin's own membership never matters, so there is no
+   **A stuck request:** a sysadmin's own membership never matters, so there is no
    self-appointment path: to unstick a request, appoint or change the organization's admin. (An earlier
    exception for a sysadmin who was an `admin` member was removed the same day, because CKAN makes an
    organization's creator its `admin` member, which defeated the rule on the demo's `fcyt`.) The order is requester capacity → `Not

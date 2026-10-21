@@ -559,8 +559,7 @@ def test_the_requester_cannot_decide_their_own_request_when_another_admin_exists
 
 def test_a_sysadmin_cannot_decide_when_the_org_has_its_own_admin(scene, store):
     """S1, the governance rule: `scene`'s organization has its own admin
-    (`scene["admin"]`), so a sysadmin who is not an admin member of it no longer
-    decides its requests. The refusal carries its own label, the request stays
+    (`scene["admin"]`), so a sysadmin no longer decides its requests. The refusal carries its own label, the request stays
     `pending` and the dataset stays private.
 
     It was `test_a_sysadmin_can_decide_someone_elses_request` until the sysadmin

@@ -361,8 +361,8 @@ def decide_reason(context, row, cache=None):
     for a caller who is not one is `Not an approver`, four eyes being reserved
     for a requester who holds the capacity. Only then four eyes, and it now
     refuses **if and only if** another person of the organization could decide
-    the request. Last, a sysadmin who is not an admin of the organization
-    defers to the organization's own administrator, if it has one.
+    the request. Last, a sysadmin defers to the organization's own
+    administrator, if it has one, whatever the sysadmin's own membership.
     """
     if cache is None:
         cache = {}
