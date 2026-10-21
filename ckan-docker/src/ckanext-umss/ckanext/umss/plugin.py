@@ -8,6 +8,7 @@ import sqlalchemy as sa
 from ckanext.umss import auth
 from ckanext.umss import charts
 from ckanext.umss import model as umss_model
+from ckanext.umss import upload_allowlist
 from ckanext.umss.logic import caller_id
 from ckanext.umss.logic.action import chart as chart_actions
 from ckanext.umss.logic.action import publication as publication_actions
@@ -22,6 +23,7 @@ class UmssPlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.IActions)
     plugins.implements(plugins.IPackageController, inherit=True)
     plugins.implements(plugins.IResourceView, inherit=True)
+    plugins.implements(plugins.IUploader, inherit=True)
 
     # IConfigurer
 
@@ -29,6 +31,17 @@ class UmssPlugin(plugins.SingletonPlugin):
         toolkit.add_template_directory(config_, "templates")
         toolkit.add_public_directory(config_, "public")
         toolkit.add_resource("assets", "umss")
+
+    # IUploader
+
+    def get_uploader(self, upload_to, old_filename=None):
+        return None
+
+    def get_resource_uploader(self, data_dict):
+        """Validates a new file's type, then returns None so CKAN's default
+        `ResourceUpload` stores it (`ckanext.umss.upload_allowlist`)."""
+        upload_allowlist.check_upload(data_dict.get("upload"))
+        return None
 
     # IResourceView
 
