@@ -3,8 +3,8 @@ volumes:
   pg_data:
   solr_data:
   pip_cache:
-  # Pinned to the interpreter: an old py3.10 volume mounted at the new path hides site-packages and CKAN fails to boot.
-  site_packages_py314:
+  # No volume over site-packages here: CKAN and ckanext-umss are installed there by the image, and a
+  # named volume keeps the first image's code across every rebuild (tests/test-prod-site-packages.sh).
 
 # XLoader settings shared by the web service and the worker. The envvars plugin maps
 # CKANEXT__XLOADER__X to ckanext.xloader.x (and overrides the ini). The submit runs in
@@ -60,7 +60,6 @@ services:
     volumes:
       - ckan_storage:/var/lib/ckan
       - pip_cache:/root/.cache/pip
-      - site_packages_py314:/usr/local/lib/python3.14/site-packages
     restart: unless-stopped
     healthcheck:
       # `wget` is not in the CKAN 2.12 images: this probe exited 127, so CKAN reported `unhealthy`
