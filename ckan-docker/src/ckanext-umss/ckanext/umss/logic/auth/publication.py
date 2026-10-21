@@ -50,9 +50,11 @@ __all__ = [
     "DECIDE_DENIED_MSG",
     "DECIDE_FOUR_EYES_MSG",
     "DECIDE_REQUESTER_CAPACITY_MSG",
+    "DECIDE_ORG_ADMIN_MSG",
     "FOUR_EYES_LABEL",
     "REQUESTER_CAPACITY_LABEL",
     "NOT_AN_APPROVER_LABEL",
+    "ORG_ADMIN_DECIDES_LABEL",
     "ALREADY_PUBLIC_LABEL",
     "CANNOT_REQUEST_LABEL",
     "CANNOT_CANCEL_LABEL",
@@ -79,6 +81,7 @@ MEMBER_STATE_ACTIVE = "active"
 FOUR_EYES_LABEL = "Four eyes"
 REQUESTER_CAPACITY_LABEL = "Requester capacity"
 NOT_AN_APPROVER_LABEL = "Not an approver"
+ORG_ADMIN_DECIDES_LABEL = "Org admin decides"
 ALREADY_PUBLIC_LABEL = "Already public"
 CANNOT_REQUEST_LABEL = "Cannot request"
 CANNOT_CANCEL_LABEL = "Cannot cancel"
@@ -103,6 +106,10 @@ DECIDE_REQUESTER_CAPACITY_MSG = "%s: %s" % (
     REQUESTER_CAPACITY_LABEL,
     "the requester can no longer update this dataset, so the request cannot "
     "be decided",
+)
+DECIDE_ORG_ADMIN_MSG = "%s: %s" % (
+    ORG_ADMIN_DECIDES_LABEL,
+    "this organization has its own administrator, who decides its requests",
 )
 ALREADY_PUBLIC_MSG = "%s: %s" % (
     ALREADY_PUBLIC_LABEL,
@@ -304,6 +311,49 @@ def _another_person_can_approve(row, cache):
     return bool(facts["approvers"] - {row.requested_by})
 
 
+def _sysadmin_defers_to_org_admin(context, row, cache):
+    """Whether the caller is a sysadmin who must leave this request to the
+    organization's own administrator: the owning organization has an active
+    non-sysadmin `admin` member and the caller is not an active `admin` member
+    of it themselves (adding oneself as one is the auditable way in).
+
+    Fails closed: a membership the user table cannot resolve may be an
+    administrator, so it counts as one. Memberships of the owning organization
+    only, never the cascade: a parent organization's admins do not make a
+    sysadmin defer, and are not what the sysadmin defers to.
+    """
+    if not _is_sysadmin_caller(context, cache):
+        return False
+    org_id = _org_id_of_dataset(row.dataset_id)
+    if not org_id:
+        return False
+    facts = _org_admin_facts_for(cache, [org_id])[org_id]
+    if not (facts["approvers"] or facts["unresolvable"]):
+        return False
+    caller = _memo(cache, "caller", "id", lambda: caller_id(context))
+    return not _memo(
+        cache,
+        "caller_admin_member",
+        (org_id, caller),
+        lambda: _is_admin_member(org_id, caller),
+    )
+
+
+def _is_admin_member(org_id, user_id):
+    if not user_id:
+        return False
+    return (
+        model.Session.query(model.Member.id)
+        .filter(model.Member.group_id == org_id)
+        .filter(model.Member.table_id == user_id)
+        .filter(model.Member.table_name == MEMBER_TABLE_NAME)
+        .filter(model.Member.capacity == ADMIN_PERMISSION)
+        .filter(model.Member.state == MEMBER_STATE_ACTIVE)
+        .first()
+        is not None
+    )
+
+
 def decide_cache(org_ids=()):
     """A per-call memo for `decide_reason`, seeded with every organization the
     call is about to ask about.
@@ -331,7 +381,8 @@ def decide_reason(context, row, cache=None):
     for a caller who is not one is `Not an approver`, four eyes being reserved
     for a requester who holds the capacity. Only then four eyes, and it now
     refuses **if and only if** another person of the organization could decide
-    the request.
+    the request. Last, a sysadmin who is not an admin of the organization
+    defers to the organization's own administrator, if it has one.
     """
     if cache is None:
         cache = {}
@@ -341,6 +392,8 @@ def decide_reason(context, row, cache=None):
         return False, DECIDE_DENIED_MSG
     if _is_requester(row, context, cache) and _another_person_can_approve(row, cache):
         return False, DECIDE_FOUR_EYES_MSG
+    if _sysadmin_defers_to_org_admin(context, row, cache):
+        return False, DECIDE_ORG_ADMIN_MSG
     return True, None
 
 

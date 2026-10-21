@@ -313,14 +313,15 @@ def test_sysadmin_bulk_update_delete_is_still_allowed(scene):
     assert deleted.state == "deleted"
 
 
-def test_the_sanctioned_flow_still_publishes_with_a_sysadmin_approver(scene, store):
+def test_the_sanctioned_flow_still_publishes_with_the_org_admin_approver(scene, store):
     """The proof the closed wall did not break the only remaining door: the
-    sysadmin cannot publish directly, but the flow still publishes when the
-    sysadmin approves someone else's request. The approving action writes with
+    wall refuses a direct publish, but the flow still publishes when the
+    organization's admin approves someone else's request (a sysadmin defers to
+    that admin since 2026-10-21). The approving action writes with
     `ignore_auth`, so the wall is never consulted for the flip."""
     created = call_as(scene["editor"], "publication_request_create",
                       dataset_id=scene["dataset"]["id"])
-    decided = call_as(factories.Sysadmin(), "publication_request_decide",
+    decided = call_as(scene["admin"], "publication_request_decide",
                       request_id=created["id"], approve=True)
     assert decided["status"] == "approved"
     assert stored(scene["dataset"]["id"])["private"] is False

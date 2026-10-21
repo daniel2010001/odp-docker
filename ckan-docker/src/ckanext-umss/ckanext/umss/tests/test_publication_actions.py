@@ -557,13 +557,58 @@ def test_the_requester_cannot_decide_their_own_request_when_another_admin_exists
     assert the_row(scene["dataset"]["id"]).status == "pending"
 
 
-def test_a_sysadmin_can_decide_someone_elses_request(scene, store):
-    """Positive control, not a discriminating test: this passes under the old
-    code too, through the stock sysadmin short-circuit. With
-    `auth_sysadmins_check` now forcing the function to run for a sysadmin, it
-    guards against the function over-narrowing; the flag's real proof is
-    `test_a_sysadmin_cannot_decide_their_own_request`."""
+def test_a_sysadmin_cannot_decide_when_the_org_has_its_own_admin(scene, store):
+    """S1, the governance rule: `scene`'s organization has its own admin
+    (`scene["admin"]`), so a sysadmin who is not an admin member of it no longer
+    decides its requests. The refusal carries its own label, the request stays
+    `pending` and the dataset stays private.
+
+    It was `test_a_sysadmin_can_decide_someone_elses_request` until the sysadmin
+    deferred to the organization's own admin (2026-10-21)."""
     sysadmin = factories.Sysadmin()
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            sysadmin,
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.ORG_ADMIN_DECIDES_LABEL + ": " in str(excinfo.value)
+    assert auth_publication.DECIDE_ORG_ADMIN_MSG in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_a_sysadmin_decides_when_the_org_has_no_admin_of_its_own(store, clean_db):
+    """S2: the organization's only admin member is its sysadmin creator (the
+    seed's case), so nobody else could decide and the sysadmin still does."""
+    editor = factories.User()
+    org = factories.Organization()
+    add_user_member(org["id"], editor["id"], "editor")
+    dataset = factories.Dataset(owner_org=org["id"], private=True)
+
+    assert org_admins(org["id"]) == set()
+
+    created = request_for(editor, dataset["id"])
+    decided = call_as(
+        factories.Sysadmin(),
+        "publication_request_decide",
+        request_id=created["id"],
+        approve=True,
+    )
+
+    assert decided["status"] == "approved"
+    assert stored(dataset["id"])["private"] is False
+
+
+def test_a_sysadmin_who_is_an_admin_member_decides_like_any_org_admin(scene, store):
+    """S3, the auditable escape hatch: a sysadmin who adds themselves as an
+    `admin` member of the organization decides its requests."""
+    sysadmin = factories.Sysadmin()
+    add_user_member(scene["org"]["id"], sysadmin["id"], "admin")
     created = request_for(scene["editor"], scene["dataset"]["id"])
 
     decided = call_as(
@@ -575,6 +620,51 @@ def test_a_sysadmin_can_decide_someone_elses_request(scene, store):
 
     assert decided["status"] == "approved"
     assert stored(scene["dataset"]["id"])["private"] is False
+
+
+def test_the_sysadmin_deferral_fails_closed_on_an_unresolvable_membership(store, clean_db):
+    """S5: an organization whose only admin member row cannot be resolved to a
+    user is not known to lack an admin, so the sysadmin is refused."""
+    editor = factories.User()
+    org = factories.Organization()
+    add_user_member(org["id"], editor["id"], "editor")
+    dataset = factories.Dataset(owner_org=org["id"], private=True)
+    created = request_for(editor, dataset["id"])
+
+    unresolvable = ckan_model.Member(
+        table_name="user",
+        table_id="00000000-0000-0000-0000-000000000000",
+        capacity="admin",
+        state="active",
+    )
+    unresolvable.group = ckan_model.Group.get(org["id"])
+    ckan_model.Session.add(unresolvable)
+    ckan_model.Session.commit()
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            factories.Sysadmin(),
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+
+    assert auth_publication.ORG_ADMIN_DECIDES_LABEL + ": " in str(excinfo.value)
+    assert the_row(dataset["id"]).status == "pending"
+    assert stored(dataset["id"])["private"] is True
+
+
+def test_the_row_tells_a_plain_sysadmin_apart_from_the_org_admin(scene, store):
+    """S4: `decidable_by_caller` comes from `decide_reason`, so the queue shows
+    the control to the organization's admin and hides it from a sysadmin who is
+    not a member of it."""
+    created = request_for(scene["editor"], scene["dataset"]["id"])
+
+    for caller, expected in ((scene["admin"], True), (factories.Sysadmin(), False)):
+        seen = call_as(caller, "publication_request_list", status="pending")
+        target = [row for row in seen if row["id"] == created["id"]]
+        assert len(target) == 1, (caller["name"], seen)
+        assert target[0]["decidable_by_caller"] is expected
 
 
 def test_a_sysadmin_cannot_decide_their_own_request(scene, store):
@@ -1083,8 +1173,8 @@ def test_the_motive_tokens_are_the_interface_values():
     )
 
 
-def test_the_eight_refusal_labels_are_the_interface_values():
-    """The eight refusal **labels** are the cross-repository interface values a
+def test_the_nine_refusal_labels_are_the_interface_values():
+    """The nine refusal **labels** are the cross-repository interface values a
     consumer matches on: the portal reads them from a single constant that
     points at `PUBLICATION-ACTIONS.md`, and CKAN gives no machine-readable code
     — an authorization failure is only `{"__type": "Authorization Error",
@@ -1092,14 +1182,14 @@ def test_the_eight_refusal_labels_are_the_interface_values():
     colon is free prose.
 
     The direct-publish action was retired with its `Not a sysadmin` label, so
-    the surviving set is eight: six on this extension's own actions and the
+    the surviving set is nine: seven on this extension's own actions and the
     wall's two.
 
     This pin freezes the labels, not the sentences: rewording the prose after a
     colon passes, changing a label fails. Breaking it means a refusal the
     portal knows arrives under a label it does not.
 
-    All eight are asserted distinct here because that distinctness *is* the
+    All nine are asserted distinct here because that distinctness *is* the
     interface.
 
     A **pin, not a RED**: it passes against the constants as first written.
@@ -1108,6 +1198,7 @@ def test_the_eight_refusal_labels_are_the_interface_values():
         auth_publication.FOUR_EYES_LABEL,
         auth_publication.REQUESTER_CAPACITY_LABEL,
         auth_publication.NOT_AN_APPROVER_LABEL,
+        auth_publication.ORG_ADMIN_DECIDES_LABEL,
         auth_publication.ALREADY_PUBLIC_LABEL,
         auth_publication.CANNOT_REQUEST_LABEL,
         auth_publication.CANNOT_CANCEL_LABEL,
@@ -1120,6 +1211,7 @@ def test_the_eight_refusal_labels_are_the_interface_values():
     assert auth_publication.FOUR_EYES_LABEL == "Four eyes"
     assert auth_publication.REQUESTER_CAPACITY_LABEL == "Requester capacity"
     assert auth_publication.NOT_AN_APPROVER_LABEL == "Not an approver"
+    assert auth_publication.ORG_ADMIN_DECIDES_LABEL == "Org admin decides"
     assert auth_publication.ALREADY_PUBLIC_LABEL == "Already public"
     assert auth_publication.CANNOT_REQUEST_LABEL == "Cannot request"
     assert auth_publication.CANNOT_CANCEL_LABEL == "Cannot cancel"
@@ -1127,8 +1219,8 @@ def test_the_eight_refusal_labels_are_the_interface_values():
     assert umss_auth.PUBLISH_DENIED_LABEL == "Publish denied"
 
     labels = action_labels + wall_labels
-    assert len(labels) == 8
-    assert len(set(labels)) == 8, labels
+    assert len(labels) == 9
+    assert len(set(labels)) == 9, labels
 
     messages = [
         (auth_publication.FOUR_EYES_LABEL, auth_publication.DECIDE_FOUR_EYES_MSG),
@@ -1137,6 +1229,10 @@ def test_the_eight_refusal_labels_are_the_interface_values():
             auth_publication.DECIDE_REQUESTER_CAPACITY_MSG,
         ),
         (auth_publication.NOT_AN_APPROVER_LABEL, auth_publication.DECIDE_DENIED_MSG),
+        (
+            auth_publication.ORG_ADMIN_DECIDES_LABEL,
+            auth_publication.DECIDE_ORG_ADMIN_MSG,
+        ),
         (auth_publication.ALREADY_PUBLIC_LABEL, auth_publication.ALREADY_PUBLIC_MSG),
         (auth_publication.CANNOT_REQUEST_LABEL, auth_publication.REQUEST_DENIED_MSG),
         (auth_publication.CANNOT_CANCEL_LABEL, auth_publication.CANCEL_DENIED_MSG),
