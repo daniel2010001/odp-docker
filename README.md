@@ -66,6 +66,8 @@ La demo v0 corre el stack de **producción** en hs-node (la laptop del homelab),
    docker compose -f docker-compose.unified.yml -f docker-compose.hs.yml --env-file .env.demo up -d --build
    ```
 
+   El stack de producción no monta ningún volumen sobre el `site-packages` de Python: CKAN y `ckanext-umss` vienen de la imagen, así que `--build` alcanza para servir el código nuevo y correr sus migraciones (`tests/test-prod-site-packages.sh`). Hasta el 2026-10-20 sí lo montaba, y ese volumen guardaba el código de la primera imagen en cada rebuild. Una demo creada antes de esa fecha conserva el volumen `odp-demo_site_packages_py314`, que ya no se usa y se puede borrar con `docker volume rm odp-demo_site_packages_py314` (no tiene datos).
+
 4. **Datos de la demo.** Primero el seed del portal crea las organizaciones y los datasets; después `bin/provision-demo-users` crea los usuarios y sus roles (`admin-fcyt`, `editor-fcyt`, `miembro-fcyt`, `editor-fcs`). Si falta una organización, se niega a escribir y pide correr el seed.
 
    ```sh
