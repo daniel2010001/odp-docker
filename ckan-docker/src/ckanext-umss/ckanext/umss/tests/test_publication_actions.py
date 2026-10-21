@@ -604,22 +604,60 @@ def test_a_sysadmin_decides_when_the_org_has_no_admin_of_its_own(store, clean_db
     assert stored(dataset["id"])["private"] is False
 
 
-def test_a_sysadmin_who_is_an_admin_member_decides_like_any_org_admin(scene, store):
-    """S3, the auditable escape hatch: a sysadmin who adds themselves as an
-    `admin` member of the organization decides its requests."""
+def test_a_sysadmin_who_is_an_admin_member_still_defers_to_the_org_admin(scene, store):
+    """S3': a sysadmin's own membership never matters. CKAN makes an
+    organization's creator its `admin` member, so honouring it would let the
+    creator decide for an organization that has its own admin."""
     sysadmin = factories.Sysadmin()
     add_user_member(scene["org"]["id"], sysadmin["id"], "admin")
+    assert sysadmin["name"] in sysadmin_members(scene["org"]["id"])
     created = request_for(scene["editor"], scene["dataset"]["id"])
 
-    decided = call_as(
-        sysadmin,
-        "publication_request_decide",
-        request_id=created["id"],
-        approve=True,
-    )
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            sysadmin,
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
 
-    assert decided["status"] == "approved"
-    assert stored(scene["dataset"]["id"])["private"] is False
+    assert auth_publication.ORG_ADMIN_DECIDES_LABEL + ": " in str(excinfo.value)
+    assert stored(scene["dataset"]["id"])["private"] is True
+    assert the_row(scene["dataset"]["id"]).status == "pending"
+
+
+def test_the_sysadmin_creator_of_an_org_defers_to_its_admin(store, clean_db):
+    """S3', the demo's case: the sysadmin creates the organization through
+    `organization_create` (so CKAN makes them an admin member), a
+    non-sysadmin admin is added, and the sysadmin neither decides nor is
+    offered the control; the org admin is."""
+    sysadmin = factories.Sysadmin()
+    org = call_as(sysadmin, "organization_create", name="creator-org")
+    admin = factories.User()
+    editor = factories.User()
+    add_user_member(org["id"], admin["id"], "admin")
+    add_user_member(org["id"], editor["id"], "editor")
+    dataset = factories.Dataset(owner_org=org["id"], private=True)
+
+    assert sysadmin["name"] in sysadmin_members(org["id"])
+
+    created = request_for(editor, dataset["id"])
+
+    for caller, expected in ((sysadmin, False), (admin, True)):
+        seen = call_as(caller, "publication_request_list", status="pending")
+        target = [row for row in seen if row["id"] == created["id"]]
+        assert len(target) == 1, (caller["name"], seen)
+        assert target[0]["decidable_by_caller"] is expected
+
+    with pytest.raises(toolkit.NotAuthorized) as excinfo:
+        call_as(
+            sysadmin,
+            "publication_request_decide",
+            request_id=created["id"],
+            approve=True,
+        )
+    assert auth_publication.ORG_ADMIN_DECIDES_LABEL + ": " in str(excinfo.value)
+    assert the_row(dataset["id"]).status == "pending"
 
 
 def test_the_sysadmin_deferral_fails_closed_on_an_unresolvable_membership(store, clean_db):

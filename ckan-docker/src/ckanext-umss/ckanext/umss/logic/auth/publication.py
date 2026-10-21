@@ -314,13 +314,16 @@ def _another_person_can_approve(row, cache):
 def _sysadmin_defers_to_org_admin(context, row, cache):
     """Whether the caller is a sysadmin who must leave this request to the
     organization's own administrator: the owning organization has an active
-    non-sysadmin `admin` member and the caller is not an active `admin` member
-    of it themselves (adding oneself as one is the auditable way in).
+    non-sysadmin `admin` member.
+
+    The sysadmin's own membership never matters: CKAN makes the creator of an
+    organization its `admin` member, so honouring it would let the creator
+    decide for an organization that has its own admin. The way out of a stuck
+    request is to appoint or change the organization's admin.
 
     Fails closed: a membership the user table cannot resolve may be an
     administrator, so it counts as one. Memberships of the owning organization
-    only, never the cascade: a parent organization's admins do not make a
-    sysadmin defer, and are not what the sysadmin defers to.
+    only, never the cascade.
     """
     if not _is_sysadmin_caller(context, cache):
         return False
@@ -328,30 +331,7 @@ def _sysadmin_defers_to_org_admin(context, row, cache):
     if not org_id:
         return False
     facts = _org_admin_facts_for(cache, [org_id])[org_id]
-    if not (facts["approvers"] or facts["unresolvable"]):
-        return False
-    caller = _memo(cache, "caller", "id", lambda: caller_id(context))
-    return not _memo(
-        cache,
-        "caller_admin_member",
-        (org_id, caller),
-        lambda: _is_admin_member(org_id, caller),
-    )
-
-
-def _is_admin_member(org_id, user_id):
-    if not user_id:
-        return False
-    return (
-        model.Session.query(model.Member.id)
-        .filter(model.Member.group_id == org_id)
-        .filter(model.Member.table_id == user_id)
-        .filter(model.Member.table_name == MEMBER_TABLE_NAME)
-        .filter(model.Member.capacity == ADMIN_PERMISSION)
-        .filter(model.Member.state == MEMBER_STATE_ACTIVE)
-        .first()
-        is not None
-    )
+    return bool(facts["approvers"] or facts["unresolvable"])
 
 
 def decide_cache(org_ids=()):
