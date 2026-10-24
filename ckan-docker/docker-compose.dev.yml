@@ -21,6 +21,14 @@ x-xloader-env: &xloader-env
   # dd/mm/yyyy dates; pairs with the DataStore database DateStyle `ISO, DMY`.
   CKANEXT__XLOADER__PARSE_DATES_DAYFIRST: "true"
 
+# Authorization policy, versioned here and not in `.env`: `environment` wins over
+# `env_file`, so a local `.env` cannot reopen it (tests/test-org-create-policy.sh).
+x-auth-env: &auth-env
+  # Only a sysadmin creates organizations (PRD); CKAN 2.12 defaults this to true.
+  # `user_create_groups` stays at its default: any registered user creates
+  # collections (RF-21).
+  CKAN__AUTH__USER_CREATE_ORGANIZATIONS: "false"
+
 services:
 
   ckan-dev:
@@ -33,7 +41,7 @@ services:
     env_file:
       - .env
     environment:
-      <<: *xloader-env
+      <<: [*xloader-env, *auth-env]
     links:
       - db
       - solr
@@ -70,7 +78,7 @@ services:
     env_file:
       - .env
     environment:
-      <<: *xloader-env
+      <<: [*xloader-env, *auth-env]
     links:
       - db
       - solr
