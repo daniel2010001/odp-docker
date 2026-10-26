@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
 #
-# Guards the rule that only a sysadmin creates organizations.
+# Guards the rule that only a sysadmin creates or deletes organizations.
 #
 # Run from anywhere:  bash tests/test-org-create-policy.sh
 #
 # CKAN 2.12 defaults `ckan.auth.user_create_organizations` to true: any logged-in user
 # can call `organization_create` and becomes the admin of the new organization. The PRD
-# reserves that to the superadministrator. The setting travels as
-# CKAN__AUTH__USER_CREATE_ORGANIZATIONS=false in the `environment:` of every CKAN
-# service, so it is versioned and a local `ckan-docker/.env` cannot turn it back on
-# (Compose: environment > env_file). Collections (groups) stay open to every registered
-# user (RF-21): `user_create_groups` is not touched.
+# reserves that to the superadministrator. `ckan.auth.user_delete_organizations` is
+# also true by default, and `organization_delete` then only asks for the `delete`
+# permission, which the org `admin` role holds: an organization's admin could delete
+# it. The PRD reserves deletion to the superadministrator too (RF-35). Both settings
+# travel as CKAN__AUTH__USER_{CREATE,DELETE}_ORGANIZATIONS=false in the `environment:`
+# of every CKAN service, so they are versioned and a local `ckan-docker/.env` cannot
+# turn them back on (Compose: environment > env_file). Collections (groups) stay open
+# to every registered user (RF-21): no `user_*_groups` setting is touched.
 #
 # What is enforced, on the resolved config of the prod compose, the hs-node demo
 # (unified + `docker-compose.hs.yml`) and the dev compose:
 #
 #   1. Every CKAN service (ckan, ckan-worker / ckan-dev, ckan-worker-dev) has
-#      CKAN__AUTH__USER_CREATE_ORGANIZATIONS=false, even with a `.env` that says true.
-#   2. No CKAN service sets CKAN__AUTH__USER_CREATE_GROUPS.
+#      CKAN__AUTH__USER_CREATE_ORGANIZATIONS=false and
+#      CKAN__AUTH__USER_DELETE_ORGANIZATIONS=false, even with a `.env` that says true.
+#   2. No CKAN service sets CKAN__AUTH__USER_CREATE_GROUPS or
+#      CKAN__AUTH__USER_DELETE_GROUPS.
 #
-# What this guard CANNOT see: the running CKAN. The live proof is `organization_create`
-# with a non-sysadmin token answering 403 (see README, "Crear organizaciones").
+# What this guard CANNOT see: the running CKAN. The live proof is a non-sysadmin token
+# answering 403 on `organization_create`, and an org admin's token answering 403 on
+# `organization_delete` while the sysadmin's succeeds (see README, "Crear y borrar
+# organizaciones").
 #
 # Every compose run uses a scratch copy with fake env values: the real `.env` files
 # are never read. `config` needs the Compose CLI but no daemon.
@@ -58,10 +65,10 @@ cp "$REPO_ROOT/docker-compose.unified.yml" "$REPO_ROOT/docker-compose.hs.yml" \
 	"$REPO_ROOT/docker-compose.dev.unified.yml" "$S/"
 cp "$REPO_ROOT/ckan-docker/docker-compose.yml" "$REPO_ROOT/ckan-docker/docker-compose.dev.yml" \
 	"$S/ckan-docker/"
-# A local `.env` that tries to reopen organization creation: the compose must win.
+# A local `.env` that tries to reopen both: the compose must win.
 {
 	cat "$REPO_ROOT/ckan-docker/.env.example"
-	printf '\nCKAN__AUTH__USER_CREATE_ORGANIZATIONS=true\n'
+	printf '\nCKAN__AUTH__USER_CREATE_ORGANIZATIONS=true\nCKAN__AUTH__USER_DELETE_ORGANIZATIONS=true\n'
 } >"$S/ckan-docker/.env"
 printf 'SESSION_SECRET=fake\n' >"$S/.env"
 awk -F= '/^[A-Z_][A-Z0-9_]*=/ && $2 == "" { print $1 "=fake-" $1; next } { print }' \
@@ -70,21 +77,25 @@ awk -F= '/^[A-Z_][A-Z0-9_]*=/ && $2 == "" { print $1 "=fake-" $1; next } { print
 compose() { (cd "$S" && DOCKER_HOST=unix:///nonexistent docker compose "$@"); }
 
 check() { # label, json, services...
-	local label="$1" json="$2" svc value
+	local label="$1" json="$2" svc op key value
 	shift 2
 	for svc in "$@"; do
-		value="$(jq -r --arg s "$svc" '.services[$s].environment.CKAN__AUTH__USER_CREATE_ORGANIZATIONS // "<unset>"' "$json")"
-		if [[ "$value" == "false" ]]; then
-			pass "$label: $svc has CKAN__AUTH__USER_CREATE_ORGANIZATIONS=false"
-		else
-			fail "$label: $svc CKAN__AUTH__USER_CREATE_ORGANIZATIONS is '$value', want 'false'"
-		fi
-		value="$(jq -r --arg s "$svc" '.services[$s].environment.CKAN__AUTH__USER_CREATE_GROUPS // "<unset>"' "$json")"
-		if [[ "$value" == "<unset>" ]]; then
-			pass "$label: $svc leaves CKAN__AUTH__USER_CREATE_GROUPS unset"
-		else
-			fail "$label: $svc sets CKAN__AUTH__USER_CREATE_GROUPS='$value' (collections stay open, RF-21)"
-		fi
+		for op in CREATE DELETE; do
+			key="CKAN__AUTH__USER_${op}_ORGANIZATIONS"
+			value="$(jq -r --arg s "$svc" --arg k "$key" '.services[$s].environment[$k] // "<unset>"' "$json")"
+			if [[ "$value" == "false" ]]; then
+				pass "$label: $svc has $key=false"
+			else
+				fail "$label: $svc $key is '$value', want 'false'"
+			fi
+			key="CKAN__AUTH__USER_${op}_GROUPS"
+			value="$(jq -r --arg s "$svc" --arg k "$key" '.services[$s].environment[$k] // "<unset>"' "$json")"
+			if [[ "$value" == "<unset>" ]]; then
+				pass "$label: $svc leaves $key unset"
+			else
+				fail "$label: $svc sets $key='$value' (collections stay open, RF-21)"
+			fi
+		done
 	done
 }
 

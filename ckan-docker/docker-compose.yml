@@ -26,6 +26,10 @@ x-auth-env: &auth-env
   # `user_create_groups` stays at its default: any registered user creates
   # collections (RF-21).
   CKAN__AUTH__USER_CREATE_ORGANIZATIONS: "false"
+  # Only a sysadmin deletes organizations (RF-35). With the default (true),
+  # `organization_delete` only asks for `delete` on the org, which its `admin`
+  # role holds. `user_delete_groups` stays at its default.
+  CKAN__AUTH__USER_DELETE_ORGANIZATIONS: "false"
 
 services:
 
