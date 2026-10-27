@@ -19,6 +19,18 @@ x-xloader-env: &xloader-env
   # dd/mm/yyyy dates; pairs with the DataStore database DateStyle `ISO, DMY`.
   CKANEXT__XLOADER__PARSE_DATES_DAYFIRST: "true"
 
+# Authorization policy, versioned here and not in `.env`: `environment` wins over
+# `env_file`, so a local `.env` cannot reopen it (tests/test-org-create-policy.sh).
+x-auth-env: &auth-env
+  # Only a sysadmin creates organizations (PRD); CKAN 2.12 defaults this to true.
+  # `user_create_groups` stays at its default: any registered user creates
+  # collections (RF-21).
+  CKAN__AUTH__USER_CREATE_ORGANIZATIONS: "false"
+  # Only a sysadmin deletes organizations (RF-35). With the default (true),
+  # `organization_delete` only asks for `delete` on the org, which its `admin`
+  # role holds. `user_delete_groups` stays at its default.
+  CKAN__AUTH__USER_DELETE_ORGANIZATIONS: "false"
+
 services:
 
   nginx:
@@ -49,7 +61,7 @@ services:
     env_file:
       - .env
     environment:
-      <<: *xloader-env
+      <<: [*xloader-env, *auth-env]
       # uWSGI's http router answers HTTP/1.1 without `Connection: close` and then closes the socket,
       # so the portal's pooled connection dies under its next request (UND_ERR_SOCKET -> 502 "no se
       # pueden cargar los graficos"). Every response now declares the close. Real keep-alive
@@ -96,7 +108,7 @@ services:
     env_file:
       - .env
     environment:
-      <<: *xloader-env
+      <<: [*xloader-env, *auth-env]
     depends_on:
       ckan:
         condition: service_healthy

@@ -99,6 +99,12 @@ En el primer arranque, sobre este stack se corren los chequeos del issue #25.
 | `frontend-proxy` | nginx: `/` → frontend, `/api/` → ckan (puerto 8080 host) |
 | `ckan`, `ckan-worker`, `db`, `solr`, `redis`, `nginx` | stack CKAN (traído vía `include` de `ckan-docker`) |
 
+## Crear y borrar organizaciones
+
+Sólo un sysadmin crea organizaciones (PRD). CKAN 2.12 trae `ckan.auth.user_create_organizations = true`, y con eso cualquier usuario con sesión podía llamar a `organization_create` y quedar como admin de la organización nueva. Los servicios de CKAN de los tres stacks (prod, demo y dev) pasan `CKAN__AUTH__USER_CREATE_ORGANIZATIONS: "false"` en su `environment:` (ancla `x-auth-env` de `ckan-docker/docker-compose.yml` y `ckan-docker/docker-compose.dev.yml`). Va versionado ahí, y no en `ckan-docker/.env`, porque `environment` gana sobre `env_file`: un `.env` local no lo puede reabrir. Las colecciones (`user_create_groups`) siguen abiertas a cualquier usuario registrado (RF-21). `tests/test-org-create-policy.sh` lo comprueba sobre la config resuelta. La prueba en vivo es `organization_create` con el token de un usuario que no es sysadmin: responde 403. Un contenedor ya creado no toma el cambio: hay que recrear `ckan` y `ckan-worker` (`ckan-dev` y `ckan-worker-dev` en dev) con `up -d`.
+
+Borrar también es sólo del sysadmin (RF-35). Con el default (`ckan.auth.user_delete_organizations = true`), `organization_delete` sólo pide el permiso `delete` sobre la organización, que tiene el rol `admin`, así que el admin de una organización que no es sysadmin (p. ej. `admin-fcyt`) podía borrarla. La misma ancla pasa `CKAN__AUTH__USER_DELETE_ORGANIZATIONS: "false"`, y `user_delete_groups` queda en su default. La prueba en vivo: el admin de una organización recibe 403 en `organization_delete` y el sysadmin la borra.
+
 ## Carga al DataStore (xloader)
 
 Los CSV y Excel subidos como recurso se cargan al DataStore con **ckanext-xloader 2.6.0** (reemplazó a DataPusher 0.0.21, que guardaba fechas dd/mm como mm/dd sin avisar). Tres piezas:
