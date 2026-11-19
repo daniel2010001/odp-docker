@@ -175,6 +175,31 @@ def test_revalidation_304_keeps_the_headers(app, create_with_upload):
 
 
 @served
+@pytest.mark.parametrize(
+    "stored, expected",
+    [
+        (
+            "informe-ñandú-€.csv",
+            "attachment; filename=informe-nandu-.csv; "
+            "filename*=UTF-8''informe-%C3%B1and%C3%BA-%E2%82%AC.csv",
+        ),
+        ("a\r\nb.csv", "attachment; filename=ab.csv"),
+    ],
+)
+def test_unusual_stored_name_still_downloads(app, create_with_upload, stored, expected):
+    # An editor can patch an upload's `url` to any text: the header must stay
+    # sendable (latin-1, no line breaks), as CKAN's own send_file made it.
+    dataset = factories.Dataset()
+    resource = create_with_upload("a,b\n1,2\n", "data.csv", package_id=dataset["id"])
+    helpers.call_action("resource_patch", id=resource["id"], url=stored)
+    response = app.get(_download_url(dataset, resource["id"]))
+    assert response.status_code == 200
+    assert response.headers["Content-Disposition"] == expected
+    assert response.headers["Content-Type"] == "text/csv"
+    assert response.headers["Content-Security-Policy"] == CSP
+
+
+@served
 def test_upload_outside_the_allowlist_is_an_octet_stream(app, create_with_upload):
     # Stands in for a file stored before PR #36: the stored name is moved to an
     # extension the allowlist no longer accepts.

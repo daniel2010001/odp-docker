@@ -24,6 +24,8 @@ and copy a 304's Content-Disposition into their cached copy); redirects to link
 resources and error pages pass through as they are.
 """
 import os
+import unicodedata
+import urllib.parse
 
 from flask import current_app, request
 
@@ -75,11 +77,25 @@ def _stored_name(resource):
     return (resource.url or "").rstrip("/").rsplit("/", 1)[-1]
 
 
+def _filename_params(stored_name):
+    """`filename` (plus `filename*` for non-ASCII) the way werkzeug's
+    `send_file` builds them, so the header stays sendable: an editor can patch
+    an upload's `url` to any text, line breaks and non-latin-1 included."""
+    name = "".join(ch for ch in stored_name if ch.isprintable()) or "download"
+    try:
+        name.encode("ascii")
+    except UnicodeEncodeError:
+        simple = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+        quoted = urllib.parse.quote(name, safe="!#$&+^`|~")
+        return {"filename": simple or "download", "filename*": f"UTF-8''{quoted}"}
+    return {"filename": name}
+
+
 def apply(response, stored_name):
     content_type, disposition, csp = decide(stored_name)
     response.headers["Content-Type"] = content_type
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers.set("Content-Disposition", disposition, filename=stored_name)
+    response.headers.set("Content-Disposition", disposition, **_filename_params(stored_name))
     if csp:
         response.headers["Content-Security-Policy"] = csp
     return response
