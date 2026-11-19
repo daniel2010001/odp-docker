@@ -9,6 +9,7 @@ CKAN's Content-Type through and previews only those exact strings.
 import struct
 import zlib
 
+import flask
 import pytest
 
 import ckan.plugins.toolkit as toolkit
@@ -119,11 +120,9 @@ def test_download_without_filename_in_the_url(app, create_with_upload):
     rid = resource["id"]
     assert response.status_code == 200
     assert response.headers["Content-Type"] == "text/csv"
-    # The filename CKAN chose (its storage location) is kept; only the
-    # disposition token is ours.
-    assert response.headers["Content-Disposition"] == (
-        f'attachment; filename="{rid[0:3]}/{rid[3:6]}/{rid[6:]}"'
-    )
+    # The served filename is the stored one, never CKAN's storage location.
+    assert rid
+    assert response.headers["Content-Disposition"] == "attachment; filename=data.csv"
     assert response.headers["X-Content-Type-Options"] == "nosniff"
     assert response.headers["Content-Security-Policy"] == CSP
 
@@ -144,13 +143,34 @@ def test_stored_mimetype_never_wins(app, create_with_upload):
 
 @served
 def test_a_requested_filename_does_not_choose_the_type(app, create_with_upload):
-    # The type follows the stored file, not the name typed in the URL.
+    # Neither the type nor the saved name follows the name typed in the URL
+    # (a csv must not be saved as page.html).
     dataset = factories.Dataset()
     resource = create_with_upload("a,b\n1,2\n", "data.csv", package_id=dataset["id"])
-    response = app.get(_download_url(dataset, resource["id"], "page.pdf"))
+    response = app.get(_download_url(dataset, resource["id"], "page.html"))
     assert response.status_code == 200
     assert response.headers["Content-Type"] == "text/csv"
-    assert response.headers["Content-Disposition"] == "attachment; filename=page.pdf"
+    assert response.headers["Content-Disposition"] == "attachment; filename=data.csv"
+    assert response.headers["Content-Security-Policy"] == CSP
+
+
+@served
+def test_revalidation_304_keeps_the_headers(app, create_with_upload):
+    # Browsers revalidate (CKAN sends must-revalidate) and copy a 304's
+    # Content-Disposition into their cached copy. The test app's storages send
+    # no validators, so CKAN's 304 is built by hand and run through the hook
+    # in a real request context for the download URL.
+    dataset = factories.Dataset()
+    resource = create_with_upload("a,b\n1,2\n", "data.csv", package_id=dataset["id"])
+    url = _download_url(dataset, resource["id"], "data.csv")
+    upstream = flask.Response(
+        status=304, headers={"Content-Disposition": "inline; filename=data.csv"}
+    )
+    with app.flask_app.test_request_context(url):
+        response = download_headers.after_request(upstream)
+    assert response.status_code == 304
+    assert response.headers["Content-Disposition"] == "attachment; filename=data.csv"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
     assert response.headers["Content-Security-Policy"] == CSP
 
 

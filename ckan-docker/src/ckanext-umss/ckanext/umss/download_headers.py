@@ -10,15 +10,18 @@ from the stored file's extension only:
 * Content-Type is one canonical type per allowlist key, bare (no `; charset`):
   the portal passes it through and previews only exact bare types;
 * `X-Content-Type-Options: nosniff` always;
-* pdf, png, jpg and jpeg are `inline`, everything else `attachment`, keeping
-  the filename parameters CKAN already chose;
+* pdf, png, jpg and jpeg are `inline`, everything else `attachment`, with the
+  stored file name (never the name typed in the URL, so a csv is not saved as
+  `evil.html`);
 * every type except pdf gets a sandbox CSP (a sandbox CSP breaks Chrome's PDF
   viewer);
 * an extension outside the allowlist (files stored before PR #36) is served as
   `application/octet-stream`, attachment, with the CSP.
 
-Only a 2xx answer of the download view for a `url_type=upload` resource is
-touched; redirects to link resources and error pages pass through as they are.
+Only a 2xx or 304 answer of the download view for a `url_type=upload`
+resource is touched (browsers revalidate, since CKAN sends must-revalidate,
+and copy a 304's Content-Disposition into their cached copy); redirects to link
+resources and error pages pass through as they are.
 """
 import os
 
@@ -76,12 +79,7 @@ def apply(response, stored_name):
     content_type, disposition, csp = decide(stored_name)
     response.headers["Content-Type"] = content_type
     response.headers["X-Content-Type-Options"] = "nosniff"
-    current = response.headers.get("Content-Disposition")
-    if current and ";" in current:
-        # Keep CKAN's filename parameters verbatim (including `filename*`).
-        response.headers["Content-Disposition"] = disposition + current[current.index(";"):]
-    else:
-        response.headers.set("Content-Disposition", disposition, filename=stored_name)
+    response.headers.set("Content-Disposition", disposition, filename=stored_name)
     if csp:
         response.headers["Content-Security-Policy"] = csp
     return response
@@ -103,7 +101,8 @@ def _is_download():
 
 
 def after_request(response):
-    if not 200 <= response.status_code < 300 or not _is_download():
+    status = response.status_code
+    if not (200 <= status < 300 or status == 304) or not _is_download():
         return response
     resource_id = (request.view_args or {}).get("resource_id")
     resource = model.Resource.get(resource_id) if resource_id else None

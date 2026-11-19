@@ -277,6 +277,27 @@ REFUSED = {
         "application/zip",
     ),
     "truncated zip as xlsx": (_xlsx()[:-30], "book.xlsx", "invalid ZIP"),
+    # Bypass attempts the independent verify probed (T1b-c); pinned here.
+    "xhtml namespace from a DTD default": (
+        '<?xml version="1.0"?><!DOCTYPE r [<!ATTLIST script xmlns CDATA "%s">]>'
+        "<r><script>alert(1)</script></r>" % XHTML,
+        "data.xml",
+        "application/xhtml+xml",
+    ),
+    "xhtml from an internal entity": (
+        '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY e "<h:script xmlns:h=\'%s\'>1'
+        '</h:script>">]><r>&e;</r>' % XHTML,
+        "data.xml",
+        "application/xhtml+xml",
+    ),
+    "utf-16 xhtml": (
+        (
+            '﻿<?xml version="1.0" encoding="UTF-16"?><r><h:script xmlns:h="%s">1'
+            "</h:script></r>" % XHTML
+        ).encode("utf-16-le"),
+        "data.xml",
+        "application/xhtml+xml",
+    ),
 }
 
 
