@@ -11,9 +11,12 @@ import zlib
 import zipfile
 
 import pytest
+from werkzeug.datastructures import FileStorage
 
 import ckan.plugins.toolkit as toolkit
 from ckan.tests import factories, helpers
+
+from ckanext.umss.upload_allowlist import check_upload
 
 
 pytestmark = [
@@ -57,6 +60,18 @@ def _xlsx():
     return _zip("[Content_Types].xml", "xl/workbook.xml")
 
 
+ODS_MIMETYPE = "application/vnd.oasis.opendocument.spreadsheet"
+
+
+def _ods(mimetype=ODS_MIMETYPE):
+    # `mimetype` first and stored, as ODF requires; that is what libmagic reads.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("mimetype", mimetype)
+        z.writestr("content.xml", "<office:document-content/>")
+    return buf.getvalue()
+
+
 PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
 GEOJSON = '{"type": "FeatureCollection", "features": []}'
 
@@ -72,6 +87,7 @@ CASES = {
     "img.jpg": _jpeg(),
     "img.jpeg": _jpeg(),
     "book.xlsx": _xlsx(),
+    "sheet.ods": _ods(),
     "bundle.zip": _zip("a.txt"),
 }
 
@@ -155,3 +171,181 @@ def test_metadata_update_of_an_existing_upload_is_unaffected(create_with_upload)
     assert updated["name"] == "renamed"
     assert updated["url_type"] == "upload"
     assert _count(dataset) == 1
+
+
+# --- check_upload content checks (S2 xml, S3 zip containers, S4 message) ---
+
+XHTML = "http://www.w3.org/1999/xhtml"
+SVG = "http://www.w3.org/2000/svg"
+# Pushes what follows past libmagic's 2048-byte window, so only the full parse
+# can see it.
+PADDING = "<row><a>1</a><b>2</b></row>" * 120
+
+
+def _storage(data, filename):
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return FileStorage(stream=io.BytesIO(data), filename=filename)
+
+
+def _mismatch(detected, extension):
+    return {
+        "upload": [
+            f"The content of the file ({detected}) does not match its "
+            f".{extension} extension. Allowed extensions: {ALLOWED}."
+        ]
+    }
+
+
+def _refused(data, filename):
+    with pytest.raises(toolkit.ValidationError) as err:
+        check_upload(_storage(data, filename))
+    return err.value.error_dict
+
+
+def _passes(data, filename):
+    # The content checks read the whole stream; the uploader then copies it
+    # from wherever it was left.
+    upload = _storage(data, filename)
+    check_upload(upload)
+    return upload.stream.tell()
+
+
+REFUSED = {
+    "xhtml document": (
+        '<?xml version="1.0"?><html xmlns="%s"><body><script>alert(1)</script>'
+        "</body></html>" % XHTML,
+        "data.xml",
+        "application/xhtml+xml",
+    ),
+    "html root without namespace": (
+        '<?xml version="1.0"?><html><body>x</body></html>',
+        "data.xml",
+        "text/html",
+    ),
+    "HTML root in capitals": (
+        '<?xml version="1.0"?><HTML><body>x</body></HTML>',
+        "data.xml",
+        "text/html",
+    ),
+    "xhtml script deep inside": (
+        '<?xml version="1.0"?><root>%s<a><b><x:script xmlns:x="%s">alert(1)'
+        "</x:script></b></a></root>" % (PADDING, XHTML),
+        "data.xml",
+        "application/xhtml+xml",
+    ),
+    "svg element inside": (
+        '<?xml version="1.0"?><root>%s<a><svg xmlns="%s"><script>alert(1)'
+        "</script></svg></a></root>" % (PADDING, SVG),
+        "data.xml",
+        "image/svg+xml",
+    ),
+    "malformed xml": (
+        '<?xml version="1.0"?><root><a>1</root>',
+        "data.xml",
+        "invalid XML",
+    ),
+    "malformed after the sniff window": (
+        '<?xml version="1.0"?><root>%s<a>1</root>' % PADDING,
+        "data.xml",
+        "invalid XML",
+    ),
+    "entity expansion bomb": (
+        '<?xml version="1.0"?><!DOCTYPE l [<!ENTITY a0 "aaaaaaaaaa">'
+        + "".join(
+            '<!ENTITY a%d "%s">' % (i, ("&a%d;" % (i - 1)) * 10) for i in range(1, 10)
+        )
+        + "]><l>&a9;</l>",
+        "data.xml",
+        "invalid XML",
+    ),
+    "bare zip as xlsx": (_zip("a.txt"), "book.xlsx", "application/zip"),
+    "xlsx without workbook": (
+        _zip("[Content_Types].xml", "xl/other.xml"),
+        "book.xlsx",
+        "application/zip",
+    ),
+    "bare zip as ods": (_zip("a.txt"), "sheet.ods", "application/zip"),
+    "ods with the wrong mimetype": (
+        _ods("application/x-foo"),
+        "sheet.ods",
+        "application/zip",
+    ),
+    "ods mimetype with a trailing newline": (
+        _ods(ODS_MIMETYPE + "\n"),
+        "sheet.ods",
+        "application/zip",
+    ),
+    "truncated zip as xlsx": (_xlsx()[:-30], "book.xlsx", "invalid ZIP"),
+    # Bypass attempts the independent verify probed (T1b-c); pinned here.
+    "xhtml namespace from a DTD default": (
+        '<?xml version="1.0"?><!DOCTYPE r [<!ATTLIST script xmlns CDATA "%s">]>'
+        "<r><script>alert(1)</script></r>" % XHTML,
+        "data.xml",
+        "application/xhtml+xml",
+    ),
+    "xhtml from an internal entity": (
+        '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY e "<h:script xmlns:h=\'%s\'>1'
+        '</h:script>">]><r>&e;</r>' % XHTML,
+        "data.xml",
+        "application/xhtml+xml",
+    ),
+    "utf-16 xhtml": (
+        (
+            '﻿<?xml version="1.0" encoding="UTF-16"?><r><h:script xmlns:h="%s">1'
+            "</h:script></r>" % XHTML
+        ).encode("utf-16-le"),
+        "data.xml",
+        "application/xhtml+xml",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REFUSED))
+def test_content_check_refuses(case):
+    data, filename, detected = REFUSED[case]
+    extension = filename.rsplit(".", 1)[1]
+    assert _refused(data, filename) == _mismatch(detected, extension)
+
+
+def _openpyxl_book():
+    openpyxl = pytest.importorskip("openpyxl")
+    buf = io.BytesIO()
+    openpyxl.Workbook().save(buf)
+    return buf.getvalue()
+
+
+PASSES = {
+    "data xml": (
+        '<?xml version="1.0"?><root xmlns:d="urn:example:data">%s<d:item>1</d:item>'
+        "</root>" % PADDING,
+        "data.xml",
+    ),
+    "xml with an html element in another namespace": (
+        '<?xml version="1.0"?><root><html xmlns="urn:example:other">x</html></root>',
+        "data.xml",
+    ),
+    "xlsx members": (_xlsx(), "book.xlsx"),
+    "ods mimetype": (_ods(), "sheet.ods"),
+    "plain zip": (_zip("a.txt"), "bundle.zip"),
+    "csv": ("a,b\n1,2\n", "data.csv"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(PASSES))
+def test_content_check_passes_and_rewinds(case):
+    data, filename = PASSES[case]
+    assert _passes(data, filename) == 0
+
+
+def test_openpyxl_workbook_passes_and_rewinds():
+    assert _passes(_openpyxl_book(), "book.xlsx") == 0
+
+
+def test_xhtml_upload_is_refused_and_nothing_is_stored(create_with_upload):
+    dataset = factories.Dataset()
+    data, filename, detected = REFUSED["xhtml script deep inside"]
+    with pytest.raises(toolkit.ValidationError) as err:
+        _upload(create_with_upload, data, filename, dataset)
+    assert err.value.error_dict == _mismatch(detected, "xml")
+    assert _count(dataset) == 0
