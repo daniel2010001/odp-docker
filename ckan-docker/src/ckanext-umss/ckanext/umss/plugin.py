@@ -7,6 +7,7 @@ import sqlalchemy as sa
 
 from ckanext.umss import auth
 from ckanext.umss import charts
+from ckanext.umss import download_headers
 from ckanext.umss import model as umss_model
 from ckanext.umss import upload_allowlist
 from ckanext.umss.logic import caller_id
@@ -24,6 +25,7 @@ class UmssPlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.IPackageController, inherit=True)
     plugins.implements(plugins.IResourceView, inherit=True)
     plugins.implements(plugins.IUploader, inherit=True)
+    plugins.implements(plugins.IMiddleware, inherit=True)
 
     # IConfigurer
 
@@ -31,6 +33,16 @@ class UmssPlugin(plugins.SingletonPlugin):
         toolkit.add_template_directory(config_, "templates")
         toolkit.add_public_directory(config_, "public")
         toolkit.add_resource("assets", "umss")
+
+    # IMiddleware
+
+    def make_middleware(self, app, config):
+        """Rewrites the serving headers of uploaded resources (D1b S1,
+        `ckanext.umss.download_headers`). CKAN 2.12 hands this hook the Flask
+        app itself (`ckan/config/middleware/flask_app.py`), so the rewrite is an
+        `after_request` on it, and the same app is returned.
+        """
+        return download_headers.install(app)
 
     # IUploader
 
