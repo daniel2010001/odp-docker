@@ -68,6 +68,15 @@ La demo v0 corre el stack de **producción** en hs-node (la laptop del homelab),
 
    El stack de producción no monta ningún volumen sobre el `site-packages` de Python: CKAN y `ckanext-umss` vienen de la imagen, así que `--build` alcanza para servir el código nuevo y correr sus migraciones (`tests/test-prod-site-packages.sh`). Hasta el 2026-10-20 sí lo montaba, y ese volumen guardaba el código de la primera imagen en cada rebuild. Una demo creada antes de esa fecha conserva el volumen `odp-demo_site_packages_py314`, que ya no se usa y se puede borrar con `docker volume rm odp-demo_site_packages_py314` (no tiene datos).
 
+   **Si un agente prepara la demo.** El guard de seguridad de Gentle AI no deja que el agente lea ni pase `.env.demo`, así que el `up` con `--env-file .env.demo` lo corre una persona. Las imágenes sí las puede preparar el agente: el build de `ckan` y `ckan-worker` no tiene `args` ni lee variables, así que sin el archivo sale la misma imagen que con `--build`:
+
+   ```sh
+   docker build -f ckan-docker/Dockerfile.umss -t odp-demo-ckan ckan-docker
+   docker tag odp-demo-ckan odp-demo-ckan-worker
+   ```
+
+   Con esas imágenes al día, la persona levanta la demo con el mismo comando de arriba pero sin `--build`. Para bajarla sin `.env.demo`, el agente usa `docker stop $(docker ps -q --filter label=com.docker.compose.project=odp-demo)`, que, igual que `stop`, no borra nada. Así se hizo el 2026-11-21 con `master` en `60792ee`.
+
 4. **Datos de la demo.** Primero el seed del portal crea las organizaciones y los datasets; después `bin/provision-demo-users` crea los usuarios y sus roles (`admin-fcyt`, `editor-fcyt`, `miembro-fcyt`, `editor-fcs`). Si falta una organización, se niega a escribir y pide correr el seed.
 
    ```sh
